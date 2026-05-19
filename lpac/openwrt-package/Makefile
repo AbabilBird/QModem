@@ -21,7 +21,7 @@ include $(INCLUDE_DIR)/cmake.mk
 define Package/lpac
   SECTION:=utils
   CATEGORY:=Utilities
-  TITLE:=eUICC eSIM LPA written in C
+  TITLE:=eUICC eSIM LPA written in C (L850GL/T99W175 patched)
   DEPENDS:= \
     +LPAC_WITH_PCSC:libpcsclite \
     +LPAC_WITH_PCSC:pcscd \
@@ -35,6 +35,14 @@ define Package/lpac/description
   lpac is a eUICC eSIM LPA manager written in C. It allows to
   manage eSIM profiles on eUICC SIM cards or modules using multiple
   backends.
+  
+  This version includes patches for Fibocom L850-GL and Foxconn T99W175
+  removable eSIM support via MBIM Low-Level UICC Access.
+  
+  When used with QModem, set use_mbim_proxy=1 on the modem config to
+  enable shared MBIM access via mbim-proxy (libmbim). This allows lpac
+  to perform non-disruptive operations (chip info, profile list) without
+  interrupting the internet connection.
 endef
 
 define Package/lpac/config
@@ -58,7 +66,6 @@ CMAKE_OPTIONS += \
 define Package/lpac/install
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) ./files/lpac.sh $(1)/usr/bin/lpac
-	$(INSTALL_BIN) ./files/l850gl-esim-manager.sh $(1)/usr/bin/l850gl-esim-manager
 
 	$(INSTALL_DIR) $(1)/etc/config
 	$(CP) ./files/lpac.uci $(1)/etc/config/lpac

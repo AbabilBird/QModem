@@ -85,6 +85,15 @@ endchoice
 	config PACKAGE_luci-app-qmodem_INCLUDE_ADD_QFIREHOSE_SUPPORT
 		bool "Add Qfirehose SUPPORT"
 		default n
+
+	config PACKAGE_luci-app-qmodem_INCLUDE_ESIM_SUPPORT
+		bool "Add eSIM/eUICC management (lpac) SUPPORT"
+		default n
+		help
+		  Include lpac package for eSIM profile management via MBIM.
+		  Requires libmbim and quectel-CM-5G-M for conflict-free operation.
+		  Supports Fibocom L850-GL, Foxconn T99W175, and other MBIM modems
+		  with removable eSIM.
 endef
 
 include $(TOPDIR)/feeds/luci/luci.mk

@@ -308,5 +308,38 @@ case $method in
     "set_sim_slot")
         set_sim_slot $3
         ;;
+    #esim/euicc management via lpac
+    "esim_chip_info")
+        esim_result=$(/usr/share/qmodem/esim_ctrl.sh chip_info $config_section)
+        json_add_string "esim_result" "$esim_result"
+        ;;
+    "esim_profile_list")
+        esim_result=$(/usr/share/qmodem/esim_ctrl.sh profile_list $config_section)
+        json_add_string "esim_result" "$esim_result"
+        ;;
+    "esim_profile_enable")
+        esim_result=$(/usr/share/qmodem/esim_ctrl.sh profile_enable $config_section "$3")
+        json_add_string "esim_result" "$esim_result"
+        ;;
+    "esim_profile_disable")
+        esim_result=$(/usr/share/qmodem/esim_ctrl.sh profile_disable $config_section "$3")
+        json_add_string "esim_result" "$esim_result"
+        ;;
+    "esim_profile_download")
+        esim_result=$(/usr/share/qmodem/esim_ctrl.sh profile_download $config_section "$3")
+        json_add_string "esim_result" "$esim_result"
+        ;;
+    "esim_profile_delete")
+        esim_result=$(/usr/share/qmodem/esim_ctrl.sh profile_delete $config_section "$3")
+        json_add_string "esim_result" "$esim_result"
+        ;;
+    "esim_notification_list")
+        esim_result=$(/usr/share/qmodem/esim_ctrl.sh notification_list $config_section)
+        json_add_string "esim_result" "$esim_result"
+        ;;
+    "esim_notification_process")
+        esim_result=$(/usr/share/qmodem/esim_ctrl.sh notification_process $config_section)
+        json_add_string "esim_result" "$esim_result"
+        ;;
 esac
 json_dump

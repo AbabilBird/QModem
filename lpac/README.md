@@ -2,7 +2,46 @@
 
 Custom **lpac 2.3.0** untuk modem **Fibocom L850GL** + removable eSIM di **OpenWrt 25.12.2**.
 
+Juga telah ditest dan bekerja pada **Foxconn T99W175** mode USB.
+
 Patch ini dibuat karena L850GL dapat berkomunikasi dengan removable eSIM lewat **MBIM Microsoft Low-Level UICC Access**, tetapi `lpac` MBIM standar gagal pada beberapa detail implementasi L850GL.
+
+## Integrasi QModem (Tanpa Conflict)
+
+lpac terintegrasi dengan QModem melalui **mbim-proxy** (libmbim). Arsitektur:
+
+```
+/dev/cdc-wdm0
+      │
+      ▼
+[mbim-proxy (libmbim)]  ← shared access daemon
+      │
+      ├──► quectel-CM -p mbim-proxy  (QModem internet dial)
+      │
+      └──► lpac (LPAC_APDU_MBIM_USE_PROXY=1)  (eSIM management)
+```
+
+### Operasi Non-Disruptive (internet tetap jalan):
+- `lpac chip info` — baca EID
+- `lpac profile list` — lihat daftar profile
+- `lpac notification list` — lihat notifikasi pending
+
+### Operasi Disruptive (internet putus sementara, auto-reconnect):
+- `lpac profile enable` — switch profile aktif
+- `lpac profile disable` — nonaktifkan profile
+- `lpac profile delete` — hapus profile
+
+QModem otomatis menangani stop/restart koneksi untuk operasi disruptive melalui `esim_ctrl.sh`.
+
+### Cara Aktifkan di QModem:
+
+```sh
+# Otomatis aktif jika modem terdeteksi MBIM dan esim_support=1 (default)
+# Manual override per-modem:
+uci set qmodem.<modem_section>.use_mbim_proxy='1'
+uci commit qmodem
+/etc/init.d/qmodem_network reload
+```
 
 Hasil test pada OpenWrt `25.12.2 ipq40xx/generic arm_cortex-a7_neon-vfpv4`:
 

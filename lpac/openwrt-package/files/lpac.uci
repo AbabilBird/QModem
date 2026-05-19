@@ -17,3 +17,14 @@ config mbim mbim
 	option		device		'/dev/cdc-wdm0'
 	option		proxy		'1'
 	option		skip_slot_mapping	'1'
+
+# QModem integration notes:
+# When proxy=1, lpac uses mbim-proxy (libmbim) to share /dev/cdc-wdm0
+# with quectel-CM. This allows non-disruptive operations like:
+#   lpac chip info
+#   lpac profile list
+# without interrupting the internet connection.
+#
+# For this to work, the QModem modem config must also have:
+#   option use_mbim_proxy '1'
+# which makes quectel-CM use -p mbim-proxy flag.

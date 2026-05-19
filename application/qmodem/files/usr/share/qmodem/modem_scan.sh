@@ -530,6 +530,20 @@ EOF
     for mode in $modes; do
         uci -q add_list qmodem.$section_name.modes=$mode
     done
+    # Auto-enable mbim-proxy for MBIM modems when eSIM support is enabled
+    # Only set on new modems (don't override user's manual setting)
+    if [ -z "$is_exist" ]; then
+        local esim_support=$(uci -q get qmodem.main.esim_support)
+        if [ "$esim_support" = "1" ]; then
+            for mode in $modes; do
+                if [ "$mode" = "mbim" ]; then
+                    uci -q set qmodem.$section_name.use_mbim_proxy="1"
+                    m_debug "eSIM support: enabled mbim-proxy for $section_name"
+                    break
+                fi
+            done
+        fi
+    fi
     for at_port in $valid_at_ports; do
         uci -q add_list qmodem.$section_name.valid_at_ports="/dev/$at_port"
         uci -q set qmodem.$section_name.at_port="/dev/$at_port"
