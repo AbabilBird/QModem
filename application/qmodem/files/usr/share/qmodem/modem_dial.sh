@@ -619,8 +619,8 @@ set_if()
         "foxconn")
             case $driver in
                 "mbim")
-                    proto="none"
-                    protov6="none"
+                    proto="dhcp"
+                    protov6="dhcpv6"
                     ;;
             esac
             ;;
@@ -1094,7 +1094,13 @@ qmi_dial()
         cmd_line="${cmd_line} -D"
     fi
     if [ -e "/usr/bin/quectel-CM-M" ];then
-        [ -n "$metric" ] && cmd_line="$cmd_line -d -M $metric"
+        if [ "$manufacturer" = "foxconn" ] && [ "$driver" = "mbim" ]; then
+            # Foxconn MBIM: don't use -d flag, let udhcpc handle IP assignment
+            # This ensures netifd knows interface is up → firewall/NAT works
+            [ -n "$metric" ] && cmd_line="$cmd_line -M $metric"
+        else
+            [ -n "$metric" ] && cmd_line="$cmd_line -d -M $metric"
+        fi
         [ "$force_set_apn" == "1" ] && cmd_line="$cmd_line -F"
     else
         [ -n "$metric" ] && cmd_line="$cmd_line"
