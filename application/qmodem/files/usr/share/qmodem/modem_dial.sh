@@ -619,6 +619,10 @@ set_if()
         "foxconn")
             case $driver in
                 "mbim")
+                    # Use dhcp - quectel-CM-M establishes MBIM session,
+                    # then udhcpc gets IP from modem's DHCP server.
+                    # This ensures netifd tracks interface state properly
+                    # (IP visible in LuCI, firewall/NAT auto-configured).
                     proto="dhcp"
                     protov6="dhcpv6"
                     ;;
@@ -1095,8 +1099,10 @@ qmi_dial()
     fi
     if [ -e "/usr/bin/quectel-CM-M" ];then
         if [ "$manufacturer" = "foxconn" ] && [ "$driver" = "mbim" ]; then
-            # Foxconn MBIM: don't use -d flag, let udhcpc handle IP assignment
-            # This ensures netifd knows interface is up → firewall/NAT works
+            # Foxconn MBIM: skip -d flag so quectel-CM-M only establishes
+            # the MBIM data session without assigning IP directly.
+            # udhcpc (proto=dhcp) handles IP assignment via modem's DHCP,
+            # ensuring netifd properly tracks interface state.
             [ -n "$metric" ] && cmd_line="$cmd_line -M $metric"
         else
             [ -n "$metric" ] && cmd_line="$cmd_line -d -M $metric"
