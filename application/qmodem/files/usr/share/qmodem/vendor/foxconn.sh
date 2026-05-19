@@ -68,17 +68,17 @@ function get_mode(){
             *90D5*) mode_num="0" ;;
         esac
 
-    if [ -z "$mode_num" ]; then
-        driver=$(get_driver)
-        case "$driver" in
-            mbim)
-                mode_num="0"
-                ;;
-            qmi|mhi|rmnet)
-                mode_num="1"
-                ;;
-        esac
-    fi
+        if [ -z "$mode_num" ]; then
+            driver=$(get_driver)
+            case "$driver" in
+                mbim)
+                    mode_num="0"
+                    ;;
+                qmi|mhi|rmnet)
+                    mode_num="1"
+                    ;;
+            esac
+        fi
     fi
     case "$platform" in
         "qualcomm")
