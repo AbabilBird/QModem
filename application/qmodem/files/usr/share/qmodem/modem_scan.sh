@@ -345,7 +345,7 @@ match_config()
 
     [[ "$name" = *"rm500u-ea"* ]] && name="rm500u-ea"
     #t99w175
-    [[ "$name" = *"mv31-w"* ]] || [[ "$name" = *"T99W175"* ]] && name="t99w175"
+    [[ "$name" = *"mv31-w"* ]] || [[ "$name" = *"t99w175"* ]] && name="t99w175"
 
     [[ "$name" = *"T99W373"* ]] && name="t99w373"
 

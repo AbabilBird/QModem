@@ -137,10 +137,33 @@ _try_device()
         return
     fi
     # if device_path not parent of netdevice_path,then disable device path an scan again
+    config_get data_interface "$1" data_interface
     netdevice_path=`readlink -f /sys/class/net/$network/device/`
-    device_path=`readlink -f $path`
-    is_parent=`echo "$device_path" | grep -q "^$netdevice_path"`
-    if [ -z "$is_parent" ] || [ ! -d "$netdevice_path" ]; then
+    device_path=`readlink -f "$path"`
+    if [ -z "$netdevice_path" ] || [ ! -d "$netdevice_path" ] || ! echo "$netdevice_path" | grep -q "^$device_path"; then
+        # Extract clean slot name from sysfs path instead of passing raw path
+        case "$path" in
+            /sys/bus/usb/devices/*)
+                slot_name="${path#/sys/bus/usb/devices/}"
+                slot_name="${slot_name%/}"
+                slot_type="usb"
+                ;;
+            /sys/bus/pci/devices/*)
+                slot_name="${path#/sys/bus/pci/devices/}"
+                slot_name="${slot_name%/}"
+                slot_type="pcie"
+                ;;
+            *)
+                slot_name="${path%/}"
+                slot_type="$data_interface"
+                ;;
+        esac
+
+        [ -z "$slot_type" ] && slot_type="$data_interface"
+        [ -z "$slot_type" ] && slot_type="usb"
+        path="$slot_name"
+        slot="$slot_type"
+
         /usr/share/qmodem/modem_scan.sh disable "$1"
         /usr/share/qmodem/modem_scan.sh add "$path" "$slot" 
     fi

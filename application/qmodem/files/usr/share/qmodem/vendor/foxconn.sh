@@ -53,20 +53,32 @@ function set_imei(){
 function get_mode(){
     local mode_num
     local mode
-    cfg=$(at $at_port $at_pre"PCIEMODE?")
-    config_type=`echo -e "$cfg" | grep -o '[0-9]'`
+    local config_type
+    local driver
+    cfg=$(at "$at_port" "${at_pre}PCIEMODE?")
+    config_type=$(echo -e "$cfg" | awk -F: '/PCIEMODE/ {gsub(/[^0-9]/, "", $2); print $2; exit}')
     if [ "$config_type" = "1" ]; then
         mode_num="0"
-    json_add_int disable_mode_btn 1
-
+        json_add_int disable_mode_btn 1
     else
-          ucfg=$(at $at_port $at_pre"USBSWITCH?")
-          config_type=$(echo "$ucfg" | grep USBSWITCH: |cut -d':' -f2|xargs)
-          if [ "$config_type" = "9025" ]; then
-             mode_num="1"
-          elif [ "$config_type" = "90D5" ]; then
-             mode_num="0"
-        fi
+        ucfg=$(at "$at_port" "${at_pre}USBSWITCH?")
+        config_type=$(echo "$ucfg" | awk -F: '/USBSWITCH/ {gsub(/[ \r]/, "", $2); print toupper($2); exit}')
+        case "$config_type" in
+            *9025*) mode_num="1" ;;
+            *90D5*) mode_num="0" ;;
+        esac
+
+    if [ -z "$mode_num" ]; then
+        driver=$(get_driver)
+        case "$driver" in
+            mbim)
+                mode_num="0"
+                ;;
+            qmi|mhi|rmnet)
+                mode_num="1"
+                ;;
+        esac
+    fi
     fi
     case "$platform" in
         "qualcomm")
@@ -113,6 +125,61 @@ set_mode(){
     json_select "result"
     json_add_string "set_mode" "$res"
     json_close_object
+}
+
+sim_switch_capabilities(){
+    local response
+    local slots
+
+    response=$(at "$at_port" "${at_pre}SWITCH_SLOT=?")
+    slots=$(echo "$response" | grep -Eio '<[0-9, ]+>' | head -n1 | tr -d '<> \r')
+
+    if echo "$slots" | grep -q '0' && echo "$slots" | grep -q '1'; then
+        json_add_string "supportSwitch" "1"
+        json_add_array "simSlots"
+        json_add_string "" "0"
+        json_add_string "" "1"
+        json_close_array
+    else
+        json_add_string "supportSwitch" "0"
+    fi
+}
+
+get_sim_slot(){
+    local response
+    local sim_slot
+
+    response=$(at "$at_port" "${at_pre}SWITCH_SLOT?")
+
+    if echo "$response" | grep -qi 'SIM1[[:space:]]*ENABLE'; then
+        sim_slot="0"
+    elif echo "$response" | grep -qi 'SIM2[[:space:]]*ENABLE'; then
+        sim_slot="1"
+    else
+        sim_slot=$(echo "$response" | awk -F: '/SWITCH_SLOT/ {gsub(/[^0-9]/, "", $2); print substr($2, 1, 1); exit}')
+    fi
+
+    json_add_string "sim_slot" "$sim_slot"
+}
+
+set_sim_slot(){
+    local sim_slot_param=$1
+    local response
+
+    case "$sim_slot_param" in
+        0|1)
+            ;;
+        2)
+            sim_slot_param="1"
+            ;;
+        *)
+            json_add_string "result" "Invalid SIM slot: $sim_slot_param"
+            return
+            ;;
+    esac
+
+    response=$(at "$at_port" "${at_pre}SWITCH_SLOT=${sim_slot_param}")
+    json_add_string "result" "$response"
 }
 
 function get_network_prefer(){
