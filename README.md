@@ -48,6 +48,7 @@ This project aims to provide a stable, extensible, and user-friendly solution fo
 - **Intuitive Web Interface**: A clean LuCI interface for at-a-glance status monitoring and configuration.
 - **Advanced Modem Control**: Fine-tune your connection with features like band locking, cell locking, and network mode selection.
 - **SMS and Multi-WAN**: Includes optional plugins for sending/receiving SMS and configuring multi-WAN failover/load balancing.
+- **eSIM/eUICC Management**: Built-in support for removable eSIM cards via lpac. Manage profiles (list, switch, download, delete) through LuCI web UI without interrupting internet connection. Tested on Fibocom L850-GL and Foxconn T99W175. Requires OpenWrt 24.10.x/25.x and lpac 2.3.0.
 - **Robust and Stable**: Designed for reliability with features like slot-based device binding and optimized AT command handling.
 
 For a complete list of features and capabilities, please see the [User Guide](docs/user-guide.md).
@@ -93,10 +94,13 @@ This project maintains comprehensive documentation to help users and developers.
 - **[User Guide](docs/user-guide.md)**: The primary document for users. It covers installation, configuration, and all features of the web interface.
 - **[Developer Guide](docs/developer-guide.md)**: For those who want to contribute, adapt a new modem, or understand the inner workings of the project. It details the project structure, core scripts, and adaptation process.
 - **[Supported Hardware List](docs/support_list.md)**: A list of modems known to be compatible with QModem.
+- **[eSIM Management Guide](lpac/README.md)**: How to use removable eSIM with QModem via lpac (L850-GL, T99W175).
 
 ## Contributing
 
 Contributions are welcome! Whether it's adding support for a new modem, fixing a bug, or improving the documentation, your help is appreciated.
+
+This is a fork of [FUjr/QModem](https://github.com/FUjr/QModem). For issues related to the upstream project, check the [upstream issues page](https://github.com/FUjr/QModem/issues).
 
 Please start by reading the **[Developer Guide](docs/developer-guide.md)** to understand the project's structure and how to get started.
 
