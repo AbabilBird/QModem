@@ -16,19 +16,19 @@ function index()
 	entry({"admin", "modem"}, firstchild(), _("Modem"), 25).dependent=false
 	entry({"admin", "modem", "qmodem"}, alias("admin", "modem", "qmodem", "modem_info"), luci.i18n.translate("QModem"), 100).dependent = true
 	--模块信息
-	entry({"admin", "modem", "qmodem", "modem_info"}, template("qmodem/modem_info"), luci.i18n.translate("QModem Information"),2).leaf = true
+	entry({"admin", "modem", "qmodem", "modem_info"}, template("qmodem/modem_info"), luci.i18n.translate("Overview"),2).leaf = true
 	entry({"admin", "modem", "qmodem", "get_modem_cfg"}, call("getModemCFG"), nil).leaf = true
 	entry({"admin", "modem", "qmodem", "modem_ctrl"}, call("modemCtrl")).leaf = true
 	--拨号配置
-	entry({"admin", "modem", "qmodem", "dial_overview"},cbi("qmodem/dial_overview"),luci.i18n.translate("Dial Overview"),3).leaf = true
+	entry({"admin", "modem", "qmodem", "dial_overview"},cbi("qmodem/dial_overview"),luci.i18n.translate("Network"),3).leaf = true
 	entry({"admin", "modem", "qmodem", "dial_config"}, cbi("qmodem/dial_config")).leaf = true
 	entry({"admin", "modem", "qmodem", "modems_dial_overview"}, call("getOverviews"), nil).leaf = true
 	--模块调试
-	entry({"admin", "modem", "qmodem", "modem_debug"},template("qmodem/modem_debug"),luci.i18n.translate("Advance Modem Settings"),4).leaf = true
+	entry({"admin", "modem", "qmodem", "modem_debug"},template("qmodem/modem_debug"),luci.i18n.translate("Modem Debug"),5).leaf = true
 	entry({"admin", "modem", "qmodem", "send_at_command"}, call("sendATCommand"), nil).leaf = true
 
 	--Qmodem设置
-	entry({"admin", "modem", "qmodem", "settings"}, cbi("qmodem/settings"), luci.i18n.translate("QModem Settings"),100).leaf = true
+	entry({"admin", "modem", "qmodem", "settings"}, cbi("qmodem/settings"), luci.i18n.translate("Settings"),50).leaf = true
 	entry({"admin", "modem", "qmodem", "slot_config"}, cbi("qmodem/slot_config")).leaf = true
 	entry({"admin", "modem", "qmodem", "modem_config"}, cbi("qmodem/modem_config")).leaf = true
 end

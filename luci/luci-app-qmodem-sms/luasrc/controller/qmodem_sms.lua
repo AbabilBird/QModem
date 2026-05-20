@@ -13,11 +13,11 @@ end
 
 function index()
     --sim卡配置
-	entry({"admin", "modem", "qmodem", "modem_sms"},template("modem_sms/modem_sms"), luci.i18n.translate("SMS"), 11).leaf = true
+	entry({"admin", "modem", "qmodem", "modem_sms"},template("modem_sms/modem_sms"), luci.i18n.translate("SMS"), 6).leaf = true
 	entry({"admin", "modem", "qmodem", "send_sms"}, call("sendSMS"), nil).leaf = true
 	entry({"admin", "modem", "qmodem", "get_sms"}, call("getSMS"), nil).leaf = true
 	entry({"admin", "modem", "qmodem", "delete_sms"}, call("delSMS"), nil).leaf = true
-	entry({"admin", "modem", "qmodem", "sms_forward"}, cbi("qmodem_sms/sms_forward"), luci.i18n.translate("SMS Forward"), 12).leaf = true
+	entry({"admin", "modem", "qmodem", "sms_forward"}, cbi("qmodem_sms/sms_forward"), luci.i18n.translate("SMS Forward"), 7).leaf = true
 	entry({"admin", "modem", "qmodem", "sms_forward_extedit"}, cbi("qmodem_sms/sms_forward_extedit")).leaf = true
 end
 
