@@ -1,13 +1,13 @@
 {
-  "admin/modem/qmodem/esim": {
-    "title": "eSIM Manager",
-    "order": 10,
-    "action": {
-      "type": "template",
-      "path": "lpac_esim/main"
-    },
-    "depends": {
-      "acl": ["luci-app-lpac-esim"]
-    }
-  }
+	"admin/modem/qmodem/esim": {
+		"title": "eSIM",
+		"order": 5.7,
+		"action": {
+			"type": "view",
+			"path": "qmodem/esim"
+		},
+		"depends": {
+			"acl": ["luci-app-lpac-esim"]
+		}
+	}
 }

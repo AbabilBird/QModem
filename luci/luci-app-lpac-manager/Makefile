@@ -53,6 +53,10 @@ define Package/$(PKG_NAME)/install
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/lpac-esim
 	$(CP) ./htdocs/luci-static/resources/lpac-esim/* $(1)/www/luci-static/resources/lpac-esim/
 
+	# JS view for qmodem-next integration
+	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/qmodem
+	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/qmodem/esim.js $(1)/www/luci-static/resources/view/qmodem/esim.js
+
 	# UCI config
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./etc/config/lpac-esim $(1)/etc/config/lpac-esim
