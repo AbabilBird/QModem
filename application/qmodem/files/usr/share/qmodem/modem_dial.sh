@@ -991,53 +991,23 @@ mbim_dial(){
     # Reset proxy flag (defensive - ensure no stale value from previous call)
     mbim_proxy_flag=""
     # Check if mbim-proxy should be used (for eSIM/lpac coexistence)
+    # NOTE: mbim-proxy is only needed when lpac is actively used.
+    # For normal dial, direct access is more reliable (avoids proxy startup race).
+    # lpac (via esim_ctrl.sh) will auto-spawn mbim-proxy when needed.
+    # Only enable proxy if explicitly forced AND all prerequisites are met.
     if [ "$use_mbim_proxy" = "1" ]; then
-        # First check: quectel-CM-M must be available (supports -p flag)
-        if [ ! -e "/usr/bin/quectel-CM-M" ]; then
-            m_debug "warning: quectel-CM-M not found, -p mbim-proxy not supported"
-            m_debug "lpac may conflict with dial. Consider installing quectel-CM-5G-M package"
-            # Fall through to qmi_dial without proxy
-            qmi_dial
-            return
-        fi
-        # Second check: mbim-proxy binary must exist
-        local proxy_bin=""
-        if [ -x /usr/libexec/mbim-proxy ]; then
-            proxy_bin="/usr/libexec/mbim-proxy"
-        elif [ -x /usr/lib/mbim-proxy ]; then
-            proxy_bin="/usr/lib/mbim-proxy"
-        elif [ -x /usr/bin/mbim-proxy ]; then
-            proxy_bin="/usr/bin/mbim-proxy"
-        fi
-        if [ -z "$proxy_bin" ]; then
-            m_debug "warning: mbim-proxy not found, falling back to direct MBIM access"
-            m_debug "install libmbim package for eSIM/lpac coexistence without conflicts"
-            qmi_dial
-            return
-        fi
-        # Third check: ensure mbim-proxy daemon is running
-        if ! pidof mbim-proxy >/dev/null 2>&1; then
-            m_debug "starting mbim-proxy daemon for eSIM coexistence"
-            $proxy_bin &
-            # Wait for proxy to be fully ready
-            local proxy_wait=0
-            while [ $proxy_wait -lt 5 ]; do
-                sleep 1
-                proxy_wait=$((proxy_wait + 1))
-                if pidof mbim-proxy >/dev/null 2>&1; then
-                    m_debug "mbim-proxy ready after ${proxy_wait}s"
-                    break
-                fi
-            done
-            if ! pidof mbim-proxy >/dev/null 2>&1; then
-                m_debug "warning: mbim-proxy failed to start after 5s, falling back to direct access"
-                qmi_dial
-                return
+        # Check if mbim-proxy is ALREADY running (started by lpac or manually)
+        # If not running, do NOT start it - just dial directly.
+        # This avoids the race condition where proxy isn't ready yet.
+        if pidof mbim-proxy >/dev/null 2>&1; then
+            # Proxy already running - use it
+            if [ -e "/usr/bin/quectel-CM-M" ]; then
+                mbim_proxy_flag="-p mbim-proxy"
+                m_debug "mbim-proxy already running, using it for dial"
             fi
+        else
+            m_debug "mbim-proxy not running, dialing directly (lpac will start proxy when needed)"
         fi
-        # All checks passed - enable proxy mode
-        mbim_proxy_flag="-p mbim-proxy"
-        m_debug "using mbim-proxy for lpac/eSIM coexistence"
     fi
     qmi_dial
 }
@@ -1113,40 +1083,19 @@ qmi_dial()
         cmd_line="$cmd_line $mbim_proxy_flag"
     fi
     cmd_line="$cmd_line -f $log_file"
-    local consecutive_failures=0
     while true; do
-        # If using mbim-proxy, ensure it's still running before each dial attempt
-        if [ -n "$mbim_proxy_flag" ]; then
-            if ! pidof mbim-proxy >/dev/null 2>&1; then
-                m_debug "mbim-proxy not running, restarting before dial retry"
-                local proxy_bin=""
-                [ -x /usr/libexec/mbim-proxy ] && proxy_bin="/usr/libexec/mbim-proxy"
-                [ -x /usr/lib/mbim-proxy ] && proxy_bin="/usr/lib/mbim-proxy"
-                [ -x /usr/bin/mbim-proxy ] && proxy_bin="/usr/bin/mbim-proxy"
-                [ -n "$proxy_bin" ] && $proxy_bin &
-                sleep 1
-                consecutive_failures=0
-            elif [ $consecutive_failures -ge 5 ]; then
-                # Proxy is running but quectel-CM keeps failing - proxy may be stale
-                m_debug "mbim-proxy may be stale (5 consecutive failures), restarting it"
-                killall mbim-proxy 2>/dev/null
-                sleep 1
-                local proxy_bin=""
-                [ -x /usr/libexec/mbim-proxy ] && proxy_bin="/usr/libexec/mbim-proxy"
-                [ -x /usr/lib/mbim-proxy ] && proxy_bin="/usr/lib/mbim-proxy"
-                [ -x /usr/bin/mbim-proxy ] && proxy_bin="/usr/bin/mbim-proxy"
-                [ -n "$proxy_bin" ] && $proxy_bin &
-                sleep 1
-                consecutive_failures=0
-            fi
+        # If using mbim-proxy flag but proxy died, drop the flag and dial directly
+        if [ -n "$mbim_proxy_flag" ] && ! pidof mbim-proxy >/dev/null 2>&1; then
+            m_debug "mbim-proxy no longer running, switching to direct MBIM access"
+            cmd_line=$(echo "$cmd_line" | sed 's/ -p mbim-proxy//')
+            mbim_proxy_flag=""
         fi
         m_debug "dialing: $cmd_line"
         $cmd_line &
         echo "$!" > "${MODEM_RUNDIR}/${modem_config}_dir/$modem_config.pid"
         m_debug "pid: $!"
         wait
-        consecutive_failures=$((consecutive_failures + 1))
-        m_debug "quectel-CM exited, retrying dial (failure #$consecutive_failures)"
+        m_debug "quectel-CM exited, retrying dial"
         sleep 3
     done
 }
