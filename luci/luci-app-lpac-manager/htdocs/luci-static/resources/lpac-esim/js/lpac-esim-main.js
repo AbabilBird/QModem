@@ -1,7 +1,7 @@
 /* lpac-esim-main.js — v1.3.5 */
 'use strict';
 
-var BASE_URL = L.env.scriptname + '/admin/modem/lpac-esim/';
+var BASE_URL = L.env.scriptname + '/admin/modem/qmodem/esim/';
 
 /* ===== Lazy load tracking ===== */
 var tabLoaded = {};

@@ -37,29 +37,29 @@ local RUN_LOG        = RUN_DIR .. "/run.log"
 -- ============================================================================
 
 function index()
-    -- Main page entry (CBI model provides the HTML shell)
-    entry({"admin", "modem", "lpac-esim"}, template("lpac_esim/main"), _("eSIM Manager"), 60)
+    -- Main page entry - nested under QModem as sub-menu
+    entry({"admin", "modem", "qmodem", "esim"}, template("lpac_esim/main"), _("eSIM Manager"), 10)
 
     -- Read-only endpoints (GET)
-    entry({"admin", "modem", "lpac-esim", "profiles"},     call("api_profiles"),     nil).leaf = true
-    entry({"admin", "modem", "lpac-esim", "chip"},         call("api_chip"),         nil).leaf = true
-    entry({"admin", "modem", "lpac-esim", "modem_status"}, call("api_modem_status"), nil).leaf = true
-    entry({"admin", "modem", "lpac-esim", "notif_list"},   call("api_notif_list"),   nil).leaf = true
-    entry({"admin", "modem", "lpac-esim", "lock_status"},  call("api_lock_status"),  nil).leaf = true
-    entry({"admin", "modem", "lpac-esim", "config"},       call("api_get_config"),   nil).leaf = true
-    entry({"admin", "modem", "lpac-esim", "connectivity"}, call("api_connectivity"), nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "profiles"},     call("api_profiles"),     nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "chip"},         call("api_chip"),         nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "modem_status"}, call("api_modem_status"), nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "notif_list"},   call("api_notif_list"),   nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "lock_status"},  call("api_lock_status"),  nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "config"},       call("api_get_config"),   nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "connectivity"}, call("api_connectivity"), nil).leaf = true
 
     -- Write endpoints (POST, some async)
-    entry({"admin", "modem", "lpac-esim", "switch"},       call("api_switch"),       nil).leaf = true
-    entry({"admin", "modem", "lpac-esim", "reboot_modem"}, call("api_reboot"),       nil).leaf = true
-    entry({"admin", "modem", "lpac-esim", "notif_clear"},  call("api_notif_clear"),  nil).leaf = true
-    entry({"admin", "modem", "lpac-esim", "save_config"},  call("api_save_config"),  nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "switch"},       call("api_switch"),       nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "reboot_modem"}, call("api_reboot"),       nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "notif_clear"},  call("api_notif_clear"),  nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "save_config"},  call("api_save_config"),  nil).leaf = true
 
-    -- Stubs — MVP placeholders, to be implemented after base testing (Section 7 of TZ)
-    entry({"admin", "modem", "lpac-esim", "download"},      call("api_download"),      nil).leaf = true
-    entry({"admin", "modem", "lpac-esim", "delete"},        call("api_delete"),        nil).leaf = true
-    entry({"admin", "modem", "lpac-esim", "nickname"},      call("api_nickname"),      nil).leaf = true
-    entry({"admin", "modem", "lpac-esim", "notif_process"}, call("api_notif_process"), nil).leaf = true
+    -- Download / Delete / Nickname / Notifications
+    entry({"admin", "modem", "qmodem", "esim", "download"},      call("api_download"),      nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "delete"},        call("api_delete"),        nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "nickname"},      call("api_nickname"),      nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "notif_process"}, call("api_notif_process"), nil).leaf = true
 end
 
 -- ============================================================================
