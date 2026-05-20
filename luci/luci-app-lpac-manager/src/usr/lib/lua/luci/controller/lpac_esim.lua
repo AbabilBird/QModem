@@ -73,10 +73,10 @@ function index()
     entry({"admin", "modem", "qmodem", "esim", "syslog"},     call("api_syslog"),     nil).leaf = true
     entry({"admin", "modem", "qmodem", "esim", "runlog"},     call("api_runlog"),     nil).leaf = true
     entry({"admin", "modem", "qmodem", "esim", "version"},    call("api_version"),    nil).leaf = true
-    entry({"admin", "modem", "lpac-esim", "at_cmd"},     call("api_at_cmd"),     nil).leaf = true
-    entry({"admin", "modem", "lpac-esim", "soft_reset"},  call("api_soft_reset"),  nil).leaf = true
-    entry({"admin", "modem", "lpac-esim", "usb_reset"},   call("api_usb_reset"),   nil).leaf = true
-    entry({"admin", "modem", "lpac-esim", "uicc_reset"},  call("api_uicc_reset"),  nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "at_cmd"},     call("api_at_cmd"),     nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "soft_reset"}, call("api_soft_reset"), nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "usb_reset"},  call("api_usb_reset"),  nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "uicc_reset"}, call("api_uicc_reset"), nil).leaf = true
 end
 
 -- ============================================================================
