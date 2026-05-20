@@ -77,6 +77,13 @@ function index()
     entry({"admin", "modem", "qmodem", "esim", "soft_reset"}, call("api_soft_reset"), nil).leaf = true
     entry({"admin", "modem", "qmodem", "esim", "usb_reset"},  call("api_usb_reset"),  nil).leaf = true
     entry({"admin", "modem", "qmodem", "esim", "uicc_reset"}, call("api_uicc_reset"), nil).leaf = true
+
+    -- Telegram Bot endpoints
+    entry({"admin", "modem", "qmodem", "esim", "telegram_config"},      call("api_telegram_config"),      nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "telegram_status"},      call("api_telegram_status"),      nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "save_telegram_config"}, call("api_save_telegram_config"), nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "test_telegram"},        call("api_test_telegram"),        nil).leaf = true
+    entry({"admin", "modem", "qmodem", "esim", "telegram_toggle"},      call("api_telegram_toggle"),      nil).leaf = true
 end
 
 -- ============================================================================
@@ -575,4 +582,139 @@ function api_uicc_reset()
     local raw  = exec_script("uicc-reset", 15)
     local data = parse_lpac_json(raw)
     send_json(data or make_error("backend_error", "No response from backend"))
+end
+
+-- ============================================================================
+-- Telegram Bot endpoints
+-- ============================================================================
+
+--- GET: Read telegram bot config from UCI
+function api_telegram_config()
+    local tg_uci = require("luci.model.uci").cursor()
+    local config = {}
+    tg_uci:foreach("qmodem_esim_bot", "bot", function(s)
+        config = s
+    end)
+    config.enabled = config.enabled or "0"
+    config.token = config.token or ""
+    config.chat_id = config.chat_id or ""
+    config.poll_interval = config.poll_interval or "30"
+    config.allow_disruptive = config.allow_disruptive or "1"
+    config.require_confirm = config.require_confirm or "1"
+    -- Mask token for security (only show first 8 and last 4 chars)
+    if config.token ~= "" and #config.token > 12 then
+        config.token = string.sub(config.token, 1, 8) .. "..." .. string.sub(config.token, -4)
+    end
+    -- Strip internal UCI fields
+    config[".type"] = nil
+    config[".name"] = nil
+    config[".anonymous"] = nil
+    config[".index"] = nil
+    send_json({ config = config })
+end
+
+--- GET: Check if bot process is running
+function api_telegram_status()
+    local running = false
+    local pid_file = "/var/run/qmodem-esim-bot.pid"
+    local f = io.open(pid_file, "r")
+    if f then
+        local pid = f:read("*l")
+        f:close()
+        if pid and pid ~= "" then
+            local check = io.open("/proc/" .. pid .. "/status", "r")
+            if check then
+                check:close()
+                running = true
+            end
+        end
+    end
+    send_json({ running = running })
+end
+
+--- POST: Save telegram bot config to UCI
+function api_save_telegram_config()
+    if not require_post() then return end
+
+    local enabled = luci.http.formvalue("enabled") or "0"
+    local token = luci.http.formvalue("token") or ""
+    local chat_id = luci.http.formvalue("chat_id") or ""
+    local poll_interval = luci.http.formvalue("poll_interval") or "30"
+    local allow_disruptive = luci.http.formvalue("allow_disruptive") or "1"
+    local require_confirm = luci.http.formvalue("require_confirm") or "1"
+
+    -- Validate
+    if enabled == "1" then
+        if token == "" then
+            send_json({ success = false, error = "Bot token is required" })
+            return
+        end
+        if chat_id == "" then
+            send_json({ success = false, error = "Chat ID is required" })
+            return
+        end
+    end
+
+    -- Save to UCI
+    local tg_uci = require("luci.model.uci").cursor()
+    tg_uci:set("qmodem_esim_bot", "main", "bot")
+    tg_uci:set("qmodem_esim_bot", "main", "enabled", enabled)
+    -- Only update token if not masked
+    if token ~= "" and not token:match("^........%.%.%.") then
+        tg_uci:set("qmodem_esim_bot", "main", "token", token)
+    end
+    tg_uci:set("qmodem_esim_bot", "main", "chat_id", chat_id)
+    tg_uci:set("qmodem_esim_bot", "main", "poll_interval", poll_interval)
+    tg_uci:set("qmodem_esim_bot", "main", "allow_disruptive", allow_disruptive)
+    tg_uci:set("qmodem_esim_bot", "main", "require_confirm", require_confirm)
+
+    if tg_uci:commit("qmodem_esim_bot") then
+        sys.exec("/etc/init.d/qmodem_esim_bot reload 2>/dev/null")
+        send_json({ success = true })
+    else
+        send_json({ success = false, error = "Failed to commit UCI" })
+    end
+end
+
+--- POST: Send test message via Telegram
+function api_test_telegram()
+    if not require_post() then return end
+
+    local token = luci.http.formvalue("token") or ""
+    local chat_id = luci.http.formvalue("chat_id") or ""
+
+    if token == "" or chat_id == "" then
+        send_json({ success = false, error = "Token and Chat ID required" })
+        return
+    end
+
+    local cmd = string.format(
+        "curl -s -m 10 -X POST 'https://api.telegram.org/bot%s/sendMessage' -d 'chat_id=%s' -d 'text=✅ QModem eSIM Bot - connection test OK!' 2>/dev/null",
+        token, chat_id
+    )
+    local result = sys.exec(cmd)
+    local ok = result and result:match('"ok":true')
+    if ok then
+        send_json({ success = true })
+    else
+        local desc = "Unknown error"
+        if result then
+            desc = result:match('"description":"([^"]*)"') or desc
+        end
+        send_json({ success = false, error = desc })
+    end
+end
+
+--- POST: Start or stop the bot service
+function api_telegram_toggle()
+    if not require_post() then return end
+
+    local action = luci.http.formvalue("action") or "start"
+
+    if action == "start" then
+        sys.exec("/etc/init.d/qmodem_esim_bot start 2>/dev/null")
+    else
+        sys.exec("/etc/init.d/qmodem_esim_bot stop 2>/dev/null")
+    end
+    send_json({ success = true })
 end

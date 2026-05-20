@@ -1,0 +1,656 @@
+#!/bin/sh
+# qmodem-esim-bot — Telegram bot for eSIM management on OpenWrt
+# POSIX shell (ash/busybox compatible)
+# Requires: curl, jq, lpac-esim, esim_ctrl.sh
+#
+# Architecture:
+#   Telegram getUpdates (long-polling) → parse command → call backend → reply
+#
+# Backend calls:
+#   Non-disruptive: lpac-esim --api (via mbim-proxy, no internet interruption)
+#   Disruptive: esim_ctrl.sh (stops dial, executes, restarts dial)
+
+APP_NAME="qmodem-esim-bot"
+APP_VER="1.0.0"
+
+###############################################################################
+# Configuration (loaded from UCI)
+###############################################################################
+
+BOT_TOKEN=""
+CHAT_ID=""
+POLL_INTERVAL=30
+POLL_TIMEOUT=25
+ALLOW_DISRUPTIVE=1
+REQUIRE_CONFIRM=1
+ENABLED=0
+
+# Runtime state
+LAST_UPDATE_ID=0
+STATE_DIR="/tmp/$APP_NAME"
+STATE_FILE="$STATE_DIR/state"
+CONFIRM_FILE="$STATE_DIR/pending_confirm"
+PID_FILE="/var/run/$APP_NAME.pid"
+
+###############################################################################
+# Logging
+###############################################################################
+
+log() { logger -t "$APP_NAME" "$1"; }
+log_debug() { [ "$DEBUG" = "1" ] && logger -t "$APP_NAME" "[DEBUG] $1"; }
+
+###############################################################################
+# UCI Config Loader
+###############################################################################
+
+load_config() {
+    . /lib/functions.sh
+    config_load qmodem_esim_bot
+
+    config_get ENABLED main enabled "0"
+    config_get BOT_TOKEN main token ""
+    config_get CHAT_ID main chat_id ""
+    config_get POLL_INTERVAL main poll_interval "30"
+    config_get ALLOW_DISRUPTIVE main allow_disruptive "1"
+    config_get REQUIRE_CONFIRM main require_confirm "1"
+    config_get DEBUG main debug "0"
+
+    # Validate
+    if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+        log "ERROR: token or chat_id not configured"
+        return 1
+    fi
+    if [ "$ENABLED" != "1" ]; then
+        log "Bot is disabled in config"
+        return 1
+    fi
+    return 0
+}
+
+###############################################################################
+# Telegram API
+###############################################################################
+
+TG_API=""
+
+tg_request() {
+    local method="$1"; shift
+    curl -s -m 35 --retry 2 --retry-delay 3 \
+        -H "Content-Type: application/json" \
+        -d "$1" \
+        "${TG_API}/${method}" 2>/dev/null
+}
+
+tg_send() {
+    local text="$1"
+    local parse_mode="${2:-HTML}"
+    local reply_markup="$3"
+
+    local payload
+    payload=$(jq -nc \
+        --arg chat_id "$CHAT_ID" \
+        --arg text "$text" \
+        --arg parse_mode "$parse_mode" \
+        '{chat_id: $chat_id, text: $text, parse_mode: $parse_mode}')
+
+    if [ -n "$reply_markup" ]; then
+        payload=$(echo "$payload" | jq --argjson rm "$reply_markup" '. + {reply_markup: $rm}')
+    fi
+
+    tg_request "sendMessage" "$payload"
+}
+
+tg_edit() {
+    local msg_id="$1"
+    local text="$2"
+    local reply_markup="$3"
+
+    local payload
+    payload=$(jq -nc \
+        --arg chat_id "$CHAT_ID" \
+        --arg message_id "$msg_id" \
+        --arg text "$text" \
+        --arg parse_mode "HTML" \
+        '{chat_id: $chat_id, message_id: $message_id, text: $text, parse_mode: $parse_mode}')
+
+    if [ -n "$reply_markup" ]; then
+        payload=$(echo "$payload" | jq --argjson rm "$reply_markup" '. + {reply_markup: $rm}')
+    fi
+
+    tg_request "editMessageText" "$payload"
+}
+
+tg_answer_callback() {
+    local callback_id="$1"
+    local text="$2"
+    tg_request "answerCallbackQuery" \
+        $(jq -nc --arg id "$callback_id" --arg text "$text" '{callback_query_id: $id, text: $text}')
+}
+
+###############################################################################
+# Backend Calls
+###############################################################################
+
+backend_chip() {
+    lpac-esim --api --backend mbim --mbim-proxy chip 2>/dev/null
+}
+
+backend_profiles() {
+    lpac-esim --api --backend mbim --mbim-proxy profiles 2>/dev/null
+}
+
+backend_modem_status() {
+    lpac-esim --api --backend mbim --mbim-proxy modem-status 2>/dev/null
+}
+
+backend_notif_list() {
+    lpac-esim --api --backend mbim --mbim-proxy notif-list 2>/dev/null
+}
+
+backend_profile_enable() {
+    local iccid="$1"
+    local modem_section
+    modem_section=$(uci show qmodem 2>/dev/null | grep "use_mbim_proxy='1'" | head -1 | cut -d. -f2)
+    [ -z "$modem_section" ] && modem_section=$(uci show qmodem 2>/dev/null | grep "=modem-device" | head -1 | cut -d. -f2 | cut -d= -f1)
+    if [ -n "$modem_section" ]; then
+        /usr/share/qmodem/esim_ctrl.sh profile_enable "$modem_section" "{\"iccid\":\"$iccid\",\"refresh\":\"0\"}"
+    else
+        echo '{"result":{"status":"0","error":"no modem section found"}}'
+    fi
+}
+
+backend_profile_download() {
+    local activation_code="$1"
+    lpac-esim --api --backend mbim --mbim-proxy download --lpa "$activation_code" 2>/dev/null
+}
+
+backend_profile_delete() {
+    local iccid="$1"
+    local modem_section
+    modem_section=$(uci show qmodem 2>/dev/null | grep "use_mbim_proxy='1'" | head -1 | cut -d. -f2)
+    [ -z "$modem_section" ] && modem_section=$(uci show qmodem 2>/dev/null | grep "=modem-device" | head -1 | cut -d. -f2 | cut -d= -f1)
+    if [ -n "$modem_section" ]; then
+        /usr/share/qmodem/esim_ctrl.sh profile_delete "$modem_section" "{\"iccid\":\"$iccid\"}"
+    else
+        echo '{"result":{"status":"0","error":"no modem section found"}}'
+    fi
+}
+
+backend_reboot() {
+    lpac-esim --api --backend mbim --mbim-proxy reboot-modem 2>/dev/null
+}
+
+backend_notif_process() {
+    lpac-esim --api --backend mbim --mbim-proxy notif-process 2>/dev/null
+}
+
+###############################################################################
+# Command Handlers
+###############################################################################
+
+cmd_start() {
+    tg_send "🤖 <b>QModem eSIM Bot</b>
+
+📡 eSIM Manager for OpenWrt
+Version: $APP_VER
+
+Ketik /help untuk daftar perintah."
+}
+
+cmd_help() {
+    tg_send "📋 <b>Daftar Perintah</b>
+
+<b>📊 Info &amp; Status</b>
+/status - Info modem &amp; koneksi
+/eid - Tampilkan EID eUICC
+/profiles - Daftar profile eSIM
+
+<b>⚙️ Manajemen Profile</b>
+/enable &lt;ICCID&gt; - Aktifkan profile
+/download &lt;LPA&gt; - Download profile baru
+/delete &lt;ICCID&gt; - Hapus profile
+
+<b>🔧 Maintenance</b>
+/reboot - Restart modem
+/notif - Proses notifikasi
+
+⚠️ Perintah disruptive meminta konfirmasi."
+}
+
+cmd_status() {
+    local raw
+    raw=$(backend_modem_status)
+    local model operator tech signal status
+
+    model=$(echo "$raw" | jq -r '.payload.data.model // "Unknown"' 2>/dev/null)
+    operator=$(echo "$raw" | jq -r '.payload.data.operator // "Unknown"' 2>/dev/null)
+    tech=$(echo "$raw" | jq -r '.payload.data.access_tech // "Unknown"' 2>/dev/null)
+    signal=$(echo "$raw" | jq -r '.payload.data.signal // "Unknown"' 2>/dev/null)
+    status=$(echo "$raw" | jq -r '.payload.data.state // "Unknown"' 2>/dev/null)
+
+    tg_send "📡 <b>Modem Status</b>
+
+Model: <code>$model</code>
+Operator: $operator
+Tech: $tech
+Signal: $signal
+Status: $status"
+}
+
+cmd_eid() {
+    local raw
+    raw=$(backend_chip)
+    local eid firmware free_mem
+
+    eid=$(echo "$raw" | jq -r '.payload.data.eidValue // "N/A"' 2>/dev/null)
+    firmware=$(echo "$raw" | jq -r '.payload.data.euiccInfo2 // .payload.data.firmwareVersion // "N/A"' 2>/dev/null)
+    free_mem=$(echo "$raw" | jq -r '.payload.data.freeNonVolatileMemory // "N/A"' 2>/dev/null)
+
+    tg_send "🔐 <b>eUICC Info</b>
+
+EID:
+<code>$eid</code>
+
+Firmware: $firmware
+Free Memory: $free_mem bytes"
+}
+
+cmd_profiles() {
+    local raw
+    raw=$(backend_profiles)
+    local count
+    count=$(echo "$raw" | jq -r '.payload.data | length' 2>/dev/null)
+
+    if [ -z "$count" ] || [ "$count" = "0" ] || [ "$count" = "null" ]; then
+        tg_send "📱 <b>eSIM Profiles</b>
+
+Tidak ada profile ditemukan."
+        return
+    fi
+
+    local text="📱 <b>eSIM Profiles</b>\n"
+    local i=0
+    local buttons="[]"
+
+    while [ $i -lt "$count" ]; do
+        local state name iccid provider
+        state=$(echo "$raw" | jq -r ".payload.data[$i].profileState" 2>/dev/null)
+        name=$(echo "$raw" | jq -r ".payload.data[$i].profileNickname // .payload.data[$i].profileName // \"Profile $((i+1))\"" 2>/dev/null)
+        iccid=$(echo "$raw" | jq -r ".payload.data[$i].iccid" 2>/dev/null)
+        provider=$(echo "$raw" | jq -r ".payload.data[$i].serviceProviderName // \"-\"" 2>/dev/null)
+
+        local icon="⬜"
+        [ "$state" = "enabled" ] && icon="✅"
+
+        local short_iccid
+        short_iccid=$(echo "$iccid" | sed 's/.*\(.....\)$/...\1/')
+
+        text="${text}\n${icon} <b>$((i+1)). $name</b>\n    ICCID: <code>$short_iccid</code> | $provider\n"
+
+        # Add inline button for disabled profiles
+        if [ "$state" != "enabled" ]; then
+            buttons=$(echo "$buttons" | jq --arg label "Enable #$((i+1))" --arg data "enable:$iccid" '. + [[{"text": $label, "callback_data": $data}]]')
+        fi
+
+        i=$((i + 1))
+    done
+
+    text="${text}\nTotal: $count profiles"
+
+    local markup=""
+    if [ "$buttons" != "[]" ] && [ "$ALLOW_DISRUPTIVE" = "1" ]; then
+        markup=$(jq -nc --argjson kb "$buttons" '{inline_keyboard: $kb}')
+    fi
+
+    tg_send "$(printf '%b' "$text")" "HTML" "$markup"
+}
+
+cmd_enable() {
+    local iccid="$1"
+    if [ -z "$iccid" ]; then
+        tg_send "⚠️ Penggunaan: /enable &lt;ICCID&gt;
+
+Gunakan /profiles untuk melihat daftar ICCID."
+        return
+    fi
+
+    if [ "$ALLOW_DISRUPTIVE" != "1" ]; then
+        tg_send "⛔ Operasi disruptive dinonaktifkan di konfigurasi."
+        return
+    fi
+
+    if [ "$REQUIRE_CONFIRM" = "1" ]; then
+        echo "enable:$iccid" > "$CONFIRM_FILE"
+        local markup
+        markup=$(jq -nc '{inline_keyboard: [[{"text":"✅ Ya, Switch","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"confirm:no"}]]}')
+        tg_send "⚠️ <b>Konfirmasi Switch Profile</b>
+
+ICCID: <code>$iccid</code>
+
+⚠️ Internet akan TERPUTUS sementara selama 30-60 detik.
+
+Lanjutkan?" "HTML" "$markup"
+        return
+    fi
+
+    do_enable "$iccid"
+}
+
+do_enable() {
+    local iccid="$1"
+    tg_send "⏳ <b>Switching profile...</b>
+
+Mohon tunggu 30-60 detik..."
+
+    local result
+    result=$(backend_profile_enable "$iccid")
+    local status
+    status=$(echo "$result" | jq -r '.result.status // "0"' 2>/dev/null)
+
+    if [ "$status" = "1" ]; then
+        tg_send "✅ <b>Profile Switched</b>
+
+ICCID: <code>$iccid</code>
+Internet telah dipulihkan."
+    else
+        local error
+        error=$(echo "$result" | jq -r '.result.error // "Unknown error"' 2>/dev/null)
+        tg_send "❌ <b>Switch Gagal</b>
+
+Error: $error"
+    fi
+}
+
+cmd_download() {
+    local lpa="$1"
+    if [ -z "$lpa" ]; then
+        tg_send "⚠️ Penggunaan: /download &lt;activation_code&gt;
+
+Contoh:
+<code>/download LPA:1\$rsp.truphone.com\$MATCHING-ID</code>"
+        return
+    fi
+
+    tg_send "⏳ <b>Downloading profile...</b>
+
+Server: $(echo "$lpa" | cut -d'$' -f2)
+Mohon tunggu..."
+
+    local result
+    result=$(backend_profile_download "$lpa")
+    local code
+    code=$(echo "$result" | jq -r '.payload.code // 99' 2>/dev/null)
+
+    if [ "$code" = "0" ]; then
+        tg_send "✅ <b>Profile Downloaded</b>
+
+Profile berhasil diunduh.
+Gunakan /profiles untuk melihat, lalu /enable untuk mengaktifkan."
+    else
+        local msg
+        msg=$(echo "$result" | jq -r '.payload.message // "Unknown error"' 2>/dev/null)
+        tg_send "❌ <b>Download Gagal</b>
+
+Code: $code
+Error: $msg"
+    fi
+}
+
+cmd_delete() {
+    local iccid="$1"
+    if [ -z "$iccid" ]; then
+        tg_send "⚠️ Penggunaan: /delete &lt;ICCID&gt;"
+        return
+    fi
+
+    if [ "$ALLOW_DISRUPTIVE" != "1" ]; then
+        tg_send "⛔ Operasi disruptive dinonaktifkan."
+        return
+    fi
+
+    if [ "$REQUIRE_CONFIRM" = "1" ]; then
+        echo "delete:$iccid" > "$CONFIRM_FILE"
+        local markup
+        markup=$(jq -nc '{inline_keyboard: [[{"text":"✅ Ya, Hapus","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"confirm:no"}]]}')
+        tg_send "⚠️ <b>Konfirmasi Hapus Profile</b>
+
+ICCID: <code>$iccid</code>
+
+Profile akan dihapus permanen. Lanjutkan?" "HTML" "$markup"
+        return
+    fi
+
+    do_delete "$iccid"
+}
+
+do_delete() {
+    local iccid="$1"
+    tg_send "⏳ Menghapus profile..."
+
+    local result
+    result=$(backend_profile_delete "$iccid")
+    local status
+    status=$(echo "$result" | jq -r '.result.status // "0"' 2>/dev/null)
+
+    if [ "$status" = "1" ]; then
+        tg_send "✅ Profile dihapus."
+    else
+        local error
+        error=$(echo "$result" | jq -r '.result.error // "Unknown error"' 2>/dev/null)
+        tg_send "❌ Gagal hapus: $error"
+    fi
+}
+
+cmd_reboot() {
+    if [ "$ALLOW_DISRUPTIVE" != "1" ]; then
+        tg_send "⛔ Operasi disruptive dinonaktifkan."
+        return
+    fi
+
+    if [ "$REQUIRE_CONFIRM" = "1" ]; then
+        echo "reboot:" > "$CONFIRM_FILE"
+        local markup
+        markup=$(jq -nc '{inline_keyboard: [[{"text":"✅ Ya, Reboot","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"confirm:no"}]]}')
+        tg_send "⚠️ <b>Konfirmasi Reboot Modem</b>
+
+Internet akan terputus sementara. Lanjutkan?" "HTML" "$markup"
+        return
+    fi
+
+    do_reboot
+}
+
+do_reboot() {
+    tg_send "⏳ Rebooting modem..."
+    backend_reboot
+    sleep 30
+    tg_send "✅ Modem reboot selesai."
+}
+
+cmd_notif() {
+    tg_send "⏳ Memproses notifikasi..."
+    local result
+    result=$(backend_notif_process)
+    local code
+    code=$(echo "$result" | jq -r '.payload.code // 99' 2>/dev/null)
+
+    if [ "$code" = "0" ]; then
+        tg_send "✅ Notifikasi diproses."
+    else
+        tg_send "❌ Gagal proses notifikasi."
+    fi
+}
+
+###############################################################################
+# Callback Handler (inline keyboard responses)
+###############################################################################
+
+handle_callback() {
+    local callback_id="$1"
+    local data="$2"
+
+    case "$data" in
+        "confirm:yes")
+            tg_answer_callback "$callback_id" "Processing..."
+            if [ -f "$CONFIRM_FILE" ]; then
+                local pending
+                pending=$(cat "$CONFIRM_FILE")
+                rm -f "$CONFIRM_FILE"
+                local action param
+                action=$(echo "$pending" | cut -d: -f1)
+                param=$(echo "$pending" | cut -d: -f2-)
+                case "$action" in
+                    enable) do_enable "$param" ;;
+                    delete) do_delete "$param" ;;
+                    reboot) do_reboot ;;
+                esac
+            fi
+            ;;
+        "confirm:no")
+            tg_answer_callback "$callback_id" "Dibatalkan"
+            rm -f "$CONFIRM_FILE"
+            tg_send "❌ Operasi dibatalkan."
+            ;;
+        enable:*)
+            local iccid="${data#enable:}"
+            tg_answer_callback "$callback_id" "Switching..."
+            cmd_enable "$iccid"
+            ;;
+    esac
+}
+
+###############################################################################
+# Message Parser
+###############################################################################
+
+process_update() {
+    local update="$1"
+
+    # Check for callback query (inline keyboard press)
+    local callback_id callback_data
+    callback_id=$(echo "$update" | jq -r '.callback_query.id // empty')
+    if [ -n "$callback_id" ]; then
+        callback_data=$(echo "$update" | jq -r '.callback_query.data // empty')
+        local cb_chat_id
+        cb_chat_id=$(echo "$update" | jq -r '.callback_query.message.chat.id // empty')
+        [ "$cb_chat_id" != "$CHAT_ID" ] && return
+        handle_callback "$callback_id" "$callback_data"
+        return
+    fi
+
+    # Check for text message
+    local msg_chat_id msg_text
+    msg_chat_id=$(echo "$update" | jq -r '.message.chat.id // empty')
+    msg_text=$(echo "$update" | jq -r '.message.text // empty')
+
+    # Security: only respond to authorized chat
+    [ "$msg_chat_id" != "$CHAT_ID" ] && return
+    [ -z "$msg_text" ] && return
+
+    # Parse command and argument
+    local cmd arg
+    cmd=$(echo "$msg_text" | awk '{print $1}' | tr 'A-Z' 'a-z')
+    arg=$(echo "$msg_text" | cut -d' ' -f2- -s)
+
+    log_debug "Command: $cmd Arg: $arg"
+
+    case "$cmd" in
+        /start)    cmd_start ;;
+        /help)     cmd_help ;;
+        /status)   cmd_status ;;
+        /eid)      cmd_eid ;;
+        /profiles) cmd_profiles ;;
+        /enable)   cmd_enable "$arg" ;;
+        /download) cmd_download "$arg" ;;
+        /delete)   cmd_delete "$arg" ;;
+        /reboot)   cmd_reboot ;;
+        /notif)    cmd_notif ;;
+        *)
+            # Ignore non-command messages silently
+            ;;
+    esac
+}
+
+###############################################################################
+# Main Loop
+###############################################################################
+
+save_state() {
+    echo "$LAST_UPDATE_ID" > "$STATE_FILE"
+}
+
+load_state() {
+    [ -f "$STATE_FILE" ] && LAST_UPDATE_ID=$(cat "$STATE_FILE")
+}
+
+cleanup() {
+    save_state
+    rm -f "$PID_FILE"
+    log "Bot stopped"
+    exit 0
+}
+
+main() {
+    # Init
+    mkdir -p "$STATE_DIR"
+    load_config || exit 1
+
+    # Re-set API URL after config load (token now available)
+    TG_API="https://api.telegram.org/bot${BOT_TOKEN}"
+
+    load_state
+    echo $$ > "$PID_FILE"
+    trap cleanup INT TERM
+
+    log "Bot started (poll_interval=${POLL_INTERVAL}s, chat_id=${CHAT_ID})"
+
+    # Main polling loop
+    while true; do
+        local offset=$((LAST_UPDATE_ID + 1))
+        local response
+
+        response=$(curl -s -m $((POLL_TIMEOUT + 5)) \
+            "${TG_API}/getUpdates?offset=${offset}&timeout=${POLL_TIMEOUT}&allowed_updates=%5B%22message%22%2C%22callback_query%22%5D" \
+            2>/dev/null)
+
+        if [ -z "$response" ]; then
+            log_debug "Empty response from Telegram (network issue?)"
+            sleep "$POLL_INTERVAL"
+            continue
+        fi
+
+        local ok
+        ok=$(echo "$response" | jq -r '.ok' 2>/dev/null)
+        if [ "$ok" != "true" ]; then
+            log "Telegram API error: $(echo "$response" | jq -r '.description // "unknown"' 2>/dev/null)"
+            sleep "$POLL_INTERVAL"
+            continue
+        fi
+
+        # Process each update
+        local updates_count
+        updates_count=$(echo "$response" | jq '.result | length' 2>/dev/null)
+
+        if [ -n "$updates_count" ] && [ "$updates_count" -gt 0 ]; then
+            local idx=0
+            while [ $idx -lt "$updates_count" ]; do
+                local update update_id
+                update=$(echo "$response" | jq ".result[$idx]")
+                update_id=$(echo "$update" | jq -r '.update_id')
+
+                if [ "$update_id" -gt "$LAST_UPDATE_ID" ]; then
+                    LAST_UPDATE_ID=$update_id
+                    process_update "$update"
+                fi
+
+                idx=$((idx + 1))
+            done
+            save_state
+        fi
+
+        # Small sleep between polls to avoid hammering on rapid responses
+        sleep 1
+    done
+}
+
+main "$@"

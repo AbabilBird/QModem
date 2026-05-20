@@ -3,3 +3,4 @@ luci-app-qmodem-sms
 luci-app-qmodem-next
 luci-app-lpac-manager
 qmodem
+qmodem-esim-bot

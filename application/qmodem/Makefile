@@ -48,7 +48,8 @@ define Package/$(PKG_NAME)
 		+PACKAGE_luci-app-qmodem_USING_QWRT_QUECTEL_CM_5G:quectel-CM-5G \
 		+PACKAGE_luci-app-qmodem_USING_NORMAL_QUECTEL_CM:quectel-cm \
 		+PACKAGE_luci-app-qmodem_INCLUDE_ESIM_SUPPORT:lpac \
-		+PACKAGE_luci-app-qmodem_INCLUDE_ESIM_SUPPORT:luci-app-lpac-manager
+		+PACKAGE_luci-app-qmodem_INCLUDE_ESIM_SUPPORT:luci-app-lpac-manager \
+		+PACKAGE_luci-app-qmodem_INCLUDE_ESIM_SUPPORT:qmodem-esim-bot
 endef
 
 define Package/$(PKG_NAME)/description
