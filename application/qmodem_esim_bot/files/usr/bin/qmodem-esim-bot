@@ -1,681 +1,774 @@
 #!/bin/sh
 # qmodem-esim-bot — Telegram bot for eSIM management on OpenWrt
-# POSIX shell (ash/busybox compatible)
+# POSIX shell (ash/busybox compatible), inspired by 0xygen-AIO bot UI
 # Requires: curl, jq, lpac-esim, esim_ctrl.sh
 #
-# Architecture:
-#   Telegram getUpdates (long-polling) → parse command → call backend → reply
-#
-# Backend calls:
-#   Non-disruptive: lpac-esim --api (via mbim-proxy, no internet interruption)
-#   Disruptive: esim_ctrl.sh (stops dial, executes, restarts dial)
+# Features:
+#   - Inline keyboard buttons with profile switch/delete
+#   - Main menu with persistent keyboard
+#   - Callback query handling (tap buttons → instant action)
+#   - Confirmation before disruptive operations
+#   - Settings menu with toggle buttons
+#   - EID info with emoji formatting
+#   - Download eSIM via LPA string
+#   - Process Notifications from button
+#   - Status file for LuCI real-time display
+#   - 64-bit chat ID handling (ARM 32-bit safe via string compare)
 
 APP_NAME="qmodem-esim-bot"
-APP_VER="1.0.0"
+APP_VER="2.0.0"
 
 ###############################################################################
-# Configuration (loaded from UCI)
+# Configuration
 ###############################################################################
 
 BOT_TOKEN=""
 CHAT_ID=""
-POLL_INTERVAL=30
+POLL_INTERVAL=2
 POLL_TIMEOUT=25
 ALLOW_DISRUPTIVE=1
 REQUIRE_CONFIRM=1
 ENABLED=0
+DEBUG=0
 
-# Runtime state
+# Runtime
 LAST_UPDATE_ID=0
-STATE_DIR="/tmp/$APP_NAME"
-STATE_FILE="$STATE_DIR/state"
-CONFIRM_FILE="$STATE_DIR/pending_confirm"
+STATE_DIR="/tmp/lpac-esim"
+OFFSET_FILE="$STATE_DIR/telegram.offset"
+STATUS_FILE="$STATE_DIR/telegram.status"
+PENDING_FILE="$STATE_DIR/telegram.pending"
 PID_FILE="/var/run/$APP_NAME.pid"
 
 ###############################################################################
-# Logging
+# Logging & Helpers
 ###############################################################################
 
-log() { logger -t "$APP_NAME" "$1"; }
-log_debug() { [ "$DEBUG" = "1" ] && logger -t "$APP_NAME" "[DEBUG] $1"; }
+log_msg() { logger -t "$APP_NAME" "$1"; }
+log_debug() { [ "$DEBUG" = "1" ] && logger -t "$APP_NAME" "[D] $1"; }
+
+write_status() {
+    local state="$1" rc="$2"
+    mkdir -p "$STATE_DIR"
+    printf '{"state":"%s","last_poll":%d,"last_rc":%d,"pid":%d}\n' \
+        "$state" "$(date +%s)" "${rc:-0}" "$$" > "$STATUS_FILE"
+}
+
+save_offset() { echo "$LAST_UPDATE_ID" > "$OFFSET_FILE"; }
+load_offset() { [ -f "$OFFSET_FILE" ] && LAST_UPDATE_ID=$(cat "$OFFSET_FILE"); }
+
+save_pending() {
+    local action="$1" arg="$2"
+    printf '%s\n%s\n' "$action" "$arg" > "$PENDING_FILE"
+}
+
+load_pending() {
+    [ -f "$PENDING_FILE" ] || return 1
+    PEND_ACTION=$(sed -n '1p' "$PENDING_FILE")
+    PEND_ARG=$(sed -n '2p' "$PENDING_FILE")
+    [ -n "$PEND_ACTION" ]
+}
+
+clear_pending() { rm -f "$PENDING_FILE"; }
 
 ###############################################################################
-# UCI Config Loader
+# UCI Config
 ###############################################################################
 
 load_config() {
     . /lib/functions.sh
     config_load qmodem_esim_bot
-
     config_get ENABLED main enabled "0"
     config_get BOT_TOKEN main token ""
     config_get CHAT_ID main chat_id ""
-    config_get POLL_INTERVAL main poll_interval "30"
+    config_get POLL_INTERVAL main poll_interval "2"
     config_get ALLOW_DISRUPTIVE main allow_disruptive "1"
     config_get REQUIRE_CONFIRM main require_confirm "1"
     config_get DEBUG main debug "0"
 
-    # Validate
-    if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
-        log "ERROR: token or chat_id not configured"
-        return 1
-    fi
-    if [ "$ENABLED" != "1" ]; then
-        log "Bot is disabled in config"
-        return 1
-    fi
+    [ -z "$BOT_TOKEN" ] && { log_msg "ERROR: token not set"; return 1; }
+    [ "$ENABLED" != "1" ] && { log_msg "disabled"; return 1; }
     return 0
 }
 
 ###############################################################################
-# Telegram API
+# Telegram API (64-bit safe: chat_id as string, never arithmetic)
 ###############################################################################
 
 TG_API=""
 
-tg_request() {
-    local method="$1"; shift
-    curl -s -m 35 --retry 2 --retry-delay 3 \
+tg_post() {
+    local method="$1" payload="$2"
+    curl -s -m 20 -X POST \
         -H "Content-Type: application/json" \
-        -d "$1" \
+        -d "$payload" \
         "${TG_API}/${method}" 2>/dev/null
 }
 
+# Send message with optional inline keyboard or reply keyboard
 tg_send() {
-    local text="$1"
-    local parse_mode="${2:-HTML}"
-    local reply_markup="$3"
-
+    local text="$1" markup="$2"
     local payload
-    payload=$(jq -nc \
-        --arg chat_id "$CHAT_ID" \
-        --arg text "$text" \
-        --arg parse_mode "$parse_mode" \
-        '{chat_id: $chat_id, text: $text, parse_mode: $parse_mode}')
-
-    if [ -n "$reply_markup" ]; then
-        payload=$(echo "$payload" | jq --argjson rm "$reply_markup" '. + {reply_markup: $rm}')
-    fi
-
-    tg_request "sendMessage" "$payload"
+    payload=$(jq -nc --arg c "$CHAT_ID" --arg t "$text" \
+        '{chat_id:$c, text:$t, parse_mode:"HTML"}')
+    [ -n "$markup" ] && payload=$(echo "$payload" | jq --argjson m "$markup" '. + {reply_markup:$m}')
+    tg_post "sendMessage" "$payload" >/dev/null
 }
 
-tg_edit() {
-    local msg_id="$1"
-    local text="$2"
-    local reply_markup="$3"
-
+# Send with inline keyboard JSON string
+tg_send_inline() {
+    local text="$1" kb_json="$2"
     local payload
-    payload=$(jq -nc \
-        --arg chat_id "$CHAT_ID" \
-        --arg message_id "$msg_id" \
-        --arg text "$text" \
-        --arg parse_mode "HTML" \
-        '{chat_id: $chat_id, message_id: $message_id, text: $text, parse_mode: $parse_mode}')
-
-    if [ -n "$reply_markup" ]; then
-        payload=$(echo "$payload" | jq --argjson rm "$reply_markup" '. + {reply_markup: $rm}')
-    fi
-
-    tg_request "editMessageText" "$payload"
+    payload=$(jq -nc --arg c "$CHAT_ID" --arg t "$text" --argjson kb "$kb_json" \
+        '{chat_id:$c, text:$t, parse_mode:"HTML", reply_markup:{inline_keyboard:$kb}}')
+    tg_post "sendMessage" "$payload" >/dev/null
 }
 
-tg_answer_callback() {
-    local callback_id="$1"
-    local text="$2"
-    tg_request "answerCallbackQuery" \
-        $(jq -nc --arg id "$callback_id" --arg text "$text" '{callback_query_id: $id, text: $text}')
+# Send with persistent reply keyboard
+tg_send_keyboard() {
+    local text="$1" kb_json="$2"
+    local payload
+    payload=$(jq -nc --arg c "$CHAT_ID" --arg t "$text" --argjson kb "$kb_json" \
+        '{chat_id:$c, text:$t, parse_mode:"HTML", reply_markup:{keyboard:$kb, resize_keyboard:true}}')
+    tg_post "sendMessage" "$payload" >/dev/null
 }
 
-###############################################################################
-# Backend Calls
-###############################################################################
-
-# Read backend config from lpac-esim UCI (same source as web UI)
-get_backend_flags() {
-    local backend=$(uci -q get lpac-esim.main.apdu_backend)
-    [ -z "$backend" ] && backend="mbim"
-    local flags="--api --backend $backend"
-    case "$backend" in
-        mbim)
-            local dev=$(uci -q get lpac-esim.main.mbim_device)
-            [ -n "$dev" ] && flags="$flags --mbim-device $dev"
-            local proxy=$(uci -q get lpac-esim.main.mbim_proxy)
-            [ "$proxy" = "1" ] && flags="$flags --mbim-proxy"
-            ;;
-        qmi)
-            local dev=$(uci -q get lpac-esim.main.qmi_device)
-            [ -n "$dev" ] && flags="$flags --device $dev"
-            local slot=$(uci -q get lpac-esim.main.qmi_sim_slot)
-            [ -n "$slot" ] && flags="$flags --slot $slot"
-            ;;
-        at)
-            local dev=$(uci -q get lpac-esim.main.at_device)
-            [ -n "$dev" ] && flags="$flags --at-device $dev"
-            ;;
-    esac
-    echo "$flags"
-}
-
-backend_chip() {
-    lpac-esim $(get_backend_flags) chip 2>/dev/null
-}
-
-backend_profiles() {
-    lpac-esim $(get_backend_flags) profiles 2>/dev/null
-}
-
-backend_modem_status() {
-    lpac-esim $(get_backend_flags) modem-status 2>/dev/null
-}
-
-backend_notif_list() {
-    lpac-esim $(get_backend_flags) notif-list 2>/dev/null
-}
-
-backend_profile_enable() {
-    local iccid="$1"
-    local modem_section
-    modem_section=$(uci show qmodem 2>/dev/null | grep "use_mbim_proxy='1'" | head -1 | cut -d. -f2)
-    [ -z "$modem_section" ] && modem_section=$(uci show qmodem 2>/dev/null | grep "=modem-device" | head -1 | cut -d. -f2 | cut -d= -f1)
-    if [ -n "$modem_section" ]; then
-        /usr/share/qmodem/esim_ctrl.sh profile_enable "$modem_section" "{\"iccid\":\"$iccid\",\"refresh\":\"0\"}"
-    else
-        echo '{"result":{"status":"0","error":"no modem section found"}}'
-    fi
-}
-
-backend_profile_download() {
-    local activation_code="$1"
-    lpac-esim $(get_backend_flags) download --lpa "$activation_code" 2>/dev/null
-}
-
-backend_profile_delete() {
-    local iccid="$1"
-    local modem_section
-    modem_section=$(uci show qmodem 2>/dev/null | grep "use_mbim_proxy='1'" | head -1 | cut -d. -f2)
-    [ -z "$modem_section" ] && modem_section=$(uci show qmodem 2>/dev/null | grep "=modem-device" | head -1 | cut -d. -f2 | cut -d= -f1)
-    if [ -n "$modem_section" ]; then
-        /usr/share/qmodem/esim_ctrl.sh profile_delete "$modem_section" "{\"iccid\":\"$iccid\"}"
-    else
-        echo '{"result":{"status":"0","error":"no modem section found"}}'
-    fi
-}
-
-backend_reboot() {
-    lpac-esim $(get_backend_flags) reboot-modem 2>/dev/null
-}
-
-backend_notif_process() {
-    lpac-esim $(get_backend_flags) notif-process 2>/dev/null
+tg_answer_cb() {
+    local cb_id="$1" text="$2"
+    tg_post "answerCallbackQuery" \
+        "$(jq -nc --arg id "$cb_id" --arg t "$text" '{callback_query_id:$id, text:$t}')" >/dev/null
 }
 
 ###############################################################################
-# Command Handlers
+# Backend Calls (lpac-esim --api)
 ###############################################################################
 
-cmd_start() {
-    tg_send "🤖 <b>QModem eSIM Bot</b>
+lpac_api() { /usr/bin/lpac-esim --api "$@" 2>/dev/null; }
 
-📡 eSIM Manager for OpenWrt
-Version: $APP_VER
-
-Ketik /help untuk daftar perintah."
+get_modem_section() {
+    uci show qmodem 2>/dev/null | grep "=modem-device" | head -1 | cut -d. -f2 | cut -d= -f1
 }
 
-cmd_help() {
-    tg_send "📋 <b>Daftar Perintah</b>
+###############################################################################
+# UI: Main Menu (persistent keyboard buttons)
+###############################################################################
 
-<b>📊 Info &amp; Status</b>
-/status - Info modem &amp; koneksi
-/eid - Tampilkan EID eUICC
-/profiles - Daftar profile eSIM
+send_main_menu() {
+    local kb='[
+        [{"text":"📱 Info EID"},{"text":"📋 Profile List"}],
+        [{"text":"📥 Download eSIM"},{"text":"🔔 Notifications"}],
+        [{"text":"📡 Modem Status"},{"text":"⚙️ Settings"}],
+        [{"text":"❓ Help"}]
+    ]'
+    tg_send_keyboard "<b>QModem eSIM Bot v${APP_VER}</b>
 
-<b>⚙️ Manajemen Profile</b>
-/enable &lt;ICCID&gt; - Aktifkan profile
-/download &lt;LPA&gt; - Download profile baru
-/delete &lt;ICCID&gt; - Hapus profile
-
-<b>🔧 Maintenance</b>
-/reboot - Restart modem
-/notif - Proses notifikasi
-
-⚠️ Perintah disruptive meminta konfirmasi."
+Pilih menu di bawah atau ketik perintah." "$kb"
 }
 
-cmd_status() {
-    local raw
-    raw=$(backend_modem_status)
-    local model operator tech signal status
+###############################################################################
+# UI: EID Info (emoji + storage + profile count)
+###############################################################################
 
-    model=$(echo "$raw" | jq -r '.payload.data.model // "Unknown"' 2>/dev/null)
-    operator=$(echo "$raw" | jq -r '.payload.data.operator // "Unknown"' 2>/dev/null)
-    tech=$(echo "$raw" | jq -r '.payload.data.access_tech // "Unknown"' 2>/dev/null)
-    signal=$(echo "$raw" | jq -r '.payload.data.signal // "Unknown"' 2>/dev/null)
-    status=$(echo "$raw" | jq -r '.payload.data.state // "Unknown"' 2>/dev/null)
+send_eid_info() {
+    local chip_raw prof_raw
+    chip_raw=$(lpac_api chip)
+    prof_raw=$(lpac_api profiles)
 
-    tg_send "📡 <b>Modem Status</b>
+    local eid svn fw free_nv free_v apps smdp smds prof_count
+    eid=$(echo "$chip_raw" | jq -r '.payload.data.eidValue // "-"')
+    svn=$(echo "$chip_raw" | jq -r '.payload.data.EUICCInfo2.svn // "-"')
+    fw=$(echo "$chip_raw" | jq -r '.payload.data.EUICCInfo2.euiccFirmwareVer // "-"')
+    free_nv=$(echo "$chip_raw" | jq -r '.payload.data.EUICCInfo2.extCardResource.freeNonVolatileMemory // "-"')
+    free_v=$(echo "$chip_raw" | jq -r '.payload.data.EUICCInfo2.extCardResource.freeVolatileMemory // "-"')
+    apps=$(echo "$chip_raw" | jq -r '.payload.data.EUICCInfo2.extCardResource.installedApplication // "0"')
+    smdp=$(echo "$chip_raw" | jq -r '.payload.data.EuiccConfiguredAddresses.defaultDpAddress // "Not set"')
+    smds=$(echo "$chip_raw" | jq -r '.payload.data.EuiccConfiguredAddresses.rootDsAddress // "-"')
+    prof_count=$(echo "$prof_raw" | jq -r '.payload.data | length // 0' 2>/dev/null)
+    [ -z "$prof_count" ] && prof_count=0
 
-Model: <code>$model</code>
-Operator: $operator
-Tech: $tech
-Signal: $signal
-Status: $status"
-}
+    # Format memory
+    local nv_kb=""
+    [ "$free_nv" != "-" ] && nv_kb="$(echo "$free_nv / 1024" | bc 2>/dev/null || echo "$free_nv") KB"
+    [ -z "$nv_kb" ] && nv_kb="$free_nv B"
 
-cmd_eid() {
-    local raw
-    raw=$(backend_chip)
-    local eid firmware free_mem
+    local text="📱 <b>eUICC / eSIM Chip Info</b>
 
-    eid=$(echo "$raw" | jq -r '.payload.data.eidValue // "N/A"' 2>/dev/null)
-    firmware=$(echo "$raw" | jq -r '.payload.data.euiccInfo2 // .payload.data.firmwareVersion // "N/A"' 2>/dev/null)
-    free_mem=$(echo "$raw" | jq -r '.payload.data.freeNonVolatileMemory // "N/A"' 2>/dev/null)
-
-    tg_send "🔐 <b>eUICC Info</b>
-
-EID:
+🔑 <b>EID:</b>
 <code>$eid</code>
 
-Firmware: $firmware
-Free Memory: $free_mem bytes"
+📊 <b>Chip Info:</b>
+  • SVN: <code>$svn</code>
+  • Firmware: <code>$fw</code>
+  • SM-DP+: <code>$smdp</code>
+  • SM-DS: <code>$smds</code>
+
+💾 <b>Storage:</b>
+  • Free NV: $nv_kb
+  • Free RAM: $free_v B
+  • Apps: $apps
+
+📂 <b>Profiles:</b> $prof_count tersimpan"
+
+    tg_send_inline "$text" '[[{"text":"📋 Profile List","callback_data":"menu:profiles"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
 }
 
-cmd_profiles() {
+###############################################################################
+# UI: Profile List (inline buttons: active=blue/locked, inactive=red/switch)
+###############################################################################
+
+send_profile_list() {
     local raw
-    raw=$(backend_profiles)
+    raw=$(lpac_api profiles)
     local count
     count=$(echo "$raw" | jq -r '.payload.data | length' 2>/dev/null)
+    [ -z "$count" ] || [ "$count" = "null" ] && count=0
 
-    if [ -z "$count" ] || [ "$count" = "0" ] || [ "$count" = "null" ]; then
-        tg_send "📱 <b>eSIM Profiles</b>
+    if [ "$count" = "0" ]; then
+        tg_send_inline "📋 <b>Profile List</b>
 
-Tidak ada profile ditemukan."
+Tidak ada eSIM profile tersimpan." \
+            '[[{"text":"📥 Download eSIM","callback_data":"menu:download"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
         return
     fi
 
-    local text="📱 <b>eSIM Profiles</b>\n"
-    local i=0
-    local buttons="[]"
+    # Build message text and keyboard JSON
+    local text="📋 <b>Profile List eSIM</b> ($count profil)
+
+🔵 = Aktif (locked)
+🔴 = Tidak aktif (tap untuk switch)
+"
+    local kb_rows="" i=0 active_iccid=""
 
     while [ $i -lt "$count" ]; do
         local state name iccid provider
-        state=$(echo "$raw" | jq -r ".payload.data[$i].profileState" 2>/dev/null)
-        name=$(echo "$raw" | jq -r ".payload.data[$i].profileNickname // .payload.data[$i].profileName // \"Profile $((i+1))\"" 2>/dev/null)
-        iccid=$(echo "$raw" | jq -r ".payload.data[$i].iccid" 2>/dev/null)
-        provider=$(echo "$raw" | jq -r ".payload.data[$i].serviceProviderName // \"-\"" 2>/dev/null)
+        state=$(echo "$raw" | jq -r ".payload.data[$i].profileState")
+        name=$(echo "$raw" | jq -r ".payload.data[$i].profileNickname // .payload.data[$i].profileName // \"Profile $((i+1))\"")
+        iccid=$(echo "$raw" | jq -r ".payload.data[$i].iccid")
+        provider=$(echo "$raw" | jq -r ".payload.data[$i].serviceProviderName // \"-\"")
 
-        local icon="⬜"
-        [ "$state" = "enabled" ] && icon="✅"
-
-        local short_iccid
-        short_iccid=$(echo "$iccid" | sed 's/.*\(.....\)$/...\1/')
-
-        text="${text}\n${icon} <b>$((i+1)). $name</b>\n    ICCID: <code>$short_iccid</code> | $provider\n"
-
-        # Add inline button for disabled profiles
-        if [ "$state" != "enabled" ]; then
-            buttons=$(echo "$buttons" | jq --arg label "Enable #$((i+1))" --arg data "enable:$iccid" '. + [[{"text": $label, "callback_data": $data}]]')
+        if [ "$state" = "enabled" ]; then
+            active_iccid="$iccid"
+            text="${text}
+✅ <b>$name</b> ($provider)
+    <code>$iccid</code>"
+            # Active profile: blue locked button (full row)
+            kb_rows="${kb_rows}[{\"text\":\"✅ $name 🔒\",\"callback_data\":\"noop\"}],"
+        else
+            text="${text}
+⬜ $name ($provider)
+    <code>$iccid</code>"
+            # Inactive: red switch button
+            kb_rows="${kb_rows}[{\"text\":\"🔴 $name\",\"callback_data\":\"sw:$iccid\"}],"
         fi
-
         i=$((i + 1))
     done
 
-    text="${text}\nTotal: $count profiles"
+    # Add action buttons at bottom
+    kb_rows="${kb_rows}[{\"text\":\"📥 Download eSIM\",\"callback_data\":\"menu:download\"},{\"text\":\"🔔 Process Notif\",\"callback_data\":\"act:notifprocess\"}],"
+    kb_rows="${kb_rows}[{\"text\":\"🏠 Menu\",\"callback_data\":\"menu:main\"}]"
 
-    local markup=""
-    if [ "$buttons" != "[]" ] && [ "$ALLOW_DISRUPTIVE" = "1" ]; then
-        markup=$(jq -nc --argjson kb "$buttons" '{inline_keyboard: $kb}')
-    fi
-
-    tg_send "$(printf '%b' "$text")" "HTML" "$markup"
+    local kb="[${kb_rows}]"
+    tg_send_inline "$text" "$kb"
 }
 
-cmd_enable() {
-    local iccid="$1"
-    if [ -z "$iccid" ]; then
-        tg_send "⚠️ Penggunaan: /enable &lt;ICCID&gt;
+###############################################################################
+# UI: Modem Status
+###############################################################################
 
-Gunakan /profiles untuk melihat daftar ICCID."
-        return
-    fi
+send_modem_status() {
+    local raw
+    raw=$(lpac_api modem-status)
+    local model op tech sig state
+    model=$(echo "$raw" | jq -r '.payload.data.model // "-"')
+    op=$(echo "$raw" | jq -r '.payload.data.operator // "-"')
+    tech=$(echo "$raw" | jq -r '.payload.data.access_tech // "-"')
+    sig=$(echo "$raw" | jq -r '.payload.data.signal_quality // "-"')
+    state=$(echo "$raw" | jq -r '.payload.data.state // "-"')
 
-    if [ "$ALLOW_DISRUPTIVE" != "1" ]; then
-        tg_send "⛔ Operasi disruptive dinonaktifkan di konfigurasi."
-        return
-    fi
+    tg_send_inline "📡 <b>Modem Status</b>
 
-    if [ "$REQUIRE_CONFIRM" = "1" ]; then
-        echo "enable:$iccid" > "$CONFIRM_FILE"
-        local markup
-        markup=$(jq -nc '{inline_keyboard: [[{"text":"✅ Ya, Switch","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"confirm:no"}]]}')
-        tg_send "⚠️ <b>Konfirmasi Switch Profile</b>
-
-ICCID: <code>$iccid</code>
-
-⚠️ Internet akan TERPUTUS sementara selama 30-60 detik.
-
-Lanjutkan?" "HTML" "$markup"
-        return
-    fi
-
-    do_enable "$iccid"
+Model: <code>$model</code>
+Operator: <b>$op</b>
+Technology: $tech
+Signal: $sig
+State: $state" \
+        '[[{"text":"🔄 Refresh","callback_data":"act:status"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
 }
 
-do_enable() {
+###############################################################################
+# UI: Settings (toggle buttons for backend config)
+###############################################################################
+
+send_settings() {
+    local backend proxy skip_slot debug_on
+    backend=$(uci -q get lpac-esim.main.apdu_backend || echo "mbim")
+    proxy=$(uci -q get lpac-esim.main.mbim_proxy || echo "1")
+    skip_slot=$(uci -q get lpac-esim.main.skip_slot_mapping || echo "1")
+    debug_on=$(uci -q get lpac-esim.main.apdu_debug || echo "0")
+    local allow_d="$ALLOW_DISRUPTIVE"
+    local req_c="$REQUIRE_CONFIRM"
+
+    local p_icon="🔴" s_icon="🔴" d_icon="🔴"
+    [ "$proxy" = "1" ] && p_icon="🔵"
+    [ "$skip_slot" = "1" ] && s_icon="🔵"
+    [ "$debug_on" = "1" ] && d_icon="🔵"
+
+    local text="⚙️ <b>Settings</b>
+
+<b>APDU Backend:</b> <code>$backend</code>
+<b>MBIM Proxy:</b> $p_icon $([ "$proxy" = "1" ] && echo ON || echo OFF)
+<b>Skip Slot Mapping:</b> $s_icon $([ "$skip_slot" = "1" ] && echo ON || echo OFF)
+<b>Debug:</b> $d_icon $([ "$debug_on" = "1" ] && echo ON || echo OFF)
+<b>Allow Disruptive:</b> $([ "$allow_d" = "1" ] && echo "✅ Yes" || echo "❌ No")
+<b>Require Confirm:</b> $([ "$req_c" = "1" ] && echo "✅ Yes" || echo "❌ No")
+
+Tap tombol untuk toggle/ubah:"
+
+    local kb='[
+        [{"text":"Backend: QMI","callback_data":"cfg:backend:qmi"},{"text":"Backend: MBIM","callback_data":"cfg:backend:mbim"},{"text":"Backend: AT","callback_data":"cfg:backend:at"}],
+        [{"text":"'"$p_icon"' MBIM Proxy","callback_data":"cfg:toggle:mbim_proxy"},{"text":"'"$s_icon"' Skip Slot","callback_data":"cfg:toggle:skip_slot_mapping"}],
+        [{"text":"'"$d_icon"' Debug","callback_data":"cfg:toggle:apdu_debug"}],
+        [{"text":"🏠 Menu","callback_data":"menu:main"}]
+    ]'
+    tg_send_inline "$text" "$kb"
+}
+
+###############################################################################
+# UI: Download eSIM prompt
+###############################################################################
+
+send_download_prompt() {
+    clear_pending
+    save_pending "download" ""
+    tg_send_inline "📥 <b>Download eSIM</b>
+
+Kirim activation code format:
+<code>LPA:1\$smdp.example.com\$MATCHING-ID</code>
+
+Atau tap Batal." \
+        '[[{"text":"❌ Batal","callback_data":"cancel"}]]'
+}
+
+###############################################################################
+# UI: Notifications
+###############################################################################
+
+send_notif_list() {
+    local raw
+    raw=$(lpac_api notif-list)
+    local code
+    code=$(echo "$raw" | jq -r '.payload.code // 99')
+    if [ "$code" = "0" ]; then
+        local count
+        count=$(echo "$raw" | jq -r '.payload.data | length // 0' 2>/dev/null)
+        [ -z "$count" ] && count=0
+        tg_send_inline "🔔 <b>Notifications</b>
+
+Pending: $count notifikasi" \
+            '[[{"text":"⚡ Process All","callback_data":"act:notifprocess"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
+    else
+        tg_send_inline "❌ Gagal baca notifikasi." '[[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
+    fi
+}
+
+###############################################################################
+# Actions (disruptive operations with confirmation)
+###############################################################################
+
+do_switch() {
     local iccid="$1"
     tg_send "⏳ <b>Switching profile...</b>
-
 Mohon tunggu 30-60 detik..."
-
-    local result
-    result=$(backend_profile_enable "$iccid")
-    local status
-    status=$(echo "$result" | jq -r '.result.status // "0"' 2>/dev/null)
-
+    local section result status
+    section=$(get_modem_section)
+    if [ -n "$section" ]; then
+        result=$(/usr/share/qmodem/esim_ctrl.sh profile_enable "$section" "{\"iccid\":\"$iccid\",\"refresh\":\"0\"}")
+    else
+        result='{"result":{"status":"0","error":"no modem section"}}'
+    fi
+    status=$(echo "$result" | jq -r '.result.status // "0"')
     if [ "$status" = "1" ]; then
-        tg_send "✅ <b>Profile Switched</b>
+        tg_send_inline "✅ <b>Profile Switched</b>
 
 ICCID: <code>$iccid</code>
-Internet telah dipulihkan."
+Internet dipulihkan." \
+            '[[{"text":"📋 Profile List","callback_data":"menu:profiles"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
     else
-        local error
-        error=$(echo "$result" | jq -r '.result.error // "Unknown error"' 2>/dev/null)
-        tg_send "❌ <b>Switch Gagal</b>
+        local err
+        err=$(echo "$result" | jq -r '.result.error // "Unknown"')
+        tg_send_inline "❌ <b>Switch Gagal</b>
 
-Error: $error"
+Error: $err" \
+            '[[{"text":"📋 Profile List","callback_data":"menu:profiles"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
     fi
-}
-
-cmd_download() {
-    local lpa="$1"
-    if [ -z "$lpa" ]; then
-        tg_send "⚠️ Penggunaan: /download &lt;activation_code&gt;
-
-Contoh:
-<code>/download LPA:1\$rsp.truphone.com\$MATCHING-ID</code>"
-        return
-    fi
-
-    tg_send "⏳ <b>Downloading profile...</b>
-
-Server: $(echo "$lpa" | cut -d'$' -f2)
-Mohon tunggu..."
-
-    local result
-    result=$(backend_profile_download "$lpa")
-    local code
-    code=$(echo "$result" | jq -r '.payload.code // 99' 2>/dev/null)
-
-    if [ "$code" = "0" ]; then
-        tg_send "✅ <b>Profile Downloaded</b>
-
-Profile berhasil diunduh.
-Gunakan /profiles untuk melihat, lalu /enable untuk mengaktifkan."
-    else
-        local msg
-        msg=$(echo "$result" | jq -r '.payload.message // "Unknown error"' 2>/dev/null)
-        tg_send "❌ <b>Download Gagal</b>
-
-Code: $code
-Error: $msg"
-    fi
-}
-
-cmd_delete() {
-    local iccid="$1"
-    if [ -z "$iccid" ]; then
-        tg_send "⚠️ Penggunaan: /delete &lt;ICCID&gt;"
-        return
-    fi
-
-    if [ "$ALLOW_DISRUPTIVE" != "1" ]; then
-        tg_send "⛔ Operasi disruptive dinonaktifkan."
-        return
-    fi
-
-    if [ "$REQUIRE_CONFIRM" = "1" ]; then
-        echo "delete:$iccid" > "$CONFIRM_FILE"
-        local markup
-        markup=$(jq -nc '{inline_keyboard: [[{"text":"✅ Ya, Hapus","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"confirm:no"}]]}')
-        tg_send "⚠️ <b>Konfirmasi Hapus Profile</b>
-
-ICCID: <code>$iccid</code>
-
-Profile akan dihapus permanen. Lanjutkan?" "HTML" "$markup"
-        return
-    fi
-
-    do_delete "$iccid"
 }
 
 do_delete() {
     local iccid="$1"
     tg_send "⏳ Menghapus profile..."
-
-    local result
-    result=$(backend_profile_delete "$iccid")
-    local status
-    status=$(echo "$result" | jq -r '.result.status // "0"' 2>/dev/null)
-
+    local section result status
+    section=$(get_modem_section)
+    if [ -n "$section" ]; then
+        result=$(/usr/share/qmodem/esim_ctrl.sh profile_delete "$section" "{\"iccid\":\"$iccid\"}")
+    else
+        result='{"result":{"status":"0","error":"no modem section"}}'
+    fi
+    status=$(echo "$result" | jq -r '.result.status // "0"')
     if [ "$status" = "1" ]; then
-        tg_send "✅ Profile dihapus."
+        tg_send_inline "✅ Profile dihapus." \
+            '[[{"text":"📋 Profile List","callback_data":"menu:profiles"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
     else
-        local error
-        error=$(echo "$result" | jq -r '.result.error // "Unknown error"' 2>/dev/null)
-        tg_send "❌ Gagal hapus: $error"
+        local err
+        err=$(echo "$result" | jq -r '.result.error // "Unknown"')
+        tg_send_inline "❌ Gagal hapus: $err" \
+            '[[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
     fi
 }
 
-cmd_reboot() {
-    if [ "$ALLOW_DISRUPTIVE" != "1" ]; then
-        tg_send "⛔ Operasi disruptive dinonaktifkan."
-        return
-    fi
-
-    if [ "$REQUIRE_CONFIRM" = "1" ]; then
-        echo "reboot:" > "$CONFIRM_FILE"
-        local markup
-        markup=$(jq -nc '{inline_keyboard: [[{"text":"✅ Ya, Reboot","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"confirm:no"}]]}')
-        tg_send "⚠️ <b>Konfirmasi Reboot Modem</b>
-
-Internet akan terputus sementara. Lanjutkan?" "HTML" "$markup"
-        return
-    fi
-
-    do_reboot
-}
-
-do_reboot() {
-    tg_send "⏳ Rebooting modem..."
-    backend_reboot
-    sleep 30
-    tg_send "✅ Modem reboot selesai."
-}
-
-cmd_notif() {
-    tg_send "⏳ Memproses notifikasi..."
-    local result
-    result=$(backend_notif_process)
-    local code
-    code=$(echo "$result" | jq -r '.payload.code // 99' 2>/dev/null)
-
+do_download() {
+    local lpa="$1"
+    tg_send "⏳ <b>Downloading profile...</b>
+Mohon tunggu..."
+    local result code
+    result=$(lpac_api download --lpa "$lpa")
+    code=$(echo "$result" | jq -r '.payload.code // 99')
     if [ "$code" = "0" ]; then
-        tg_send "✅ Notifikasi diproses."
+        tg_send_inline "✅ <b>Profile Downloaded</b>
+
+Gunakan Profile List untuk melihat dan switch." \
+            '[[{"text":"📋 Profile List","callback_data":"menu:profiles"},{"text":"🔔 Process Notif","callback_data":"act:notifprocess"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
     else
-        tg_send "❌ Gagal proses notifikasi."
+        local msg
+        msg=$(echo "$result" | jq -r '.payload.message // "Unknown error"')
+        tg_send_inline "❌ <b>Download Gagal</b>
+
+Error: $msg" \
+            '[[{"text":"📥 Coba Lagi","callback_data":"menu:download"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
+    fi
+}
+
+do_notif_process() {
+    tg_send "⏳ Memproses notifikasi..."
+    local result code
+    result=$(lpac_api notif-process)
+    code=$(echo "$result" | jq -r '.payload.code // 99')
+    if [ "$code" = "0" ]; then
+        tg_send_inline "✅ Notifikasi diproses." \
+            '[[{"text":"📋 Profile List","callback_data":"menu:profiles"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
+    else
+        tg_send_inline "❌ Gagal proses notifikasi." \
+            '[[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
     fi
 }
 
 ###############################################################################
-# Callback Handler (inline keyboard responses)
+# Callback Query Handler (inline keyboard button taps)
 ###############################################################################
 
 handle_callback() {
-    local callback_id="$1"
-    local data="$2"
+    local cb_id="$1" data="$2" cb_chat="$3"
+
+    # Security: only respond to authorized chat (string compare, 64-bit safe)
+    [ -n "$CHAT_ID" ] && [ "$cb_chat" != "$CHAT_ID" ] && return
+
+    tg_answer_cb "$cb_id" ""
 
     case "$data" in
-        "confirm:yes")
-            tg_answer_callback "$callback_id" "Processing..."
-            if [ -f "$CONFIRM_FILE" ]; then
-                local pending
-                pending=$(cat "$CONFIRM_FILE")
-                rm -f "$CONFIRM_FILE"
-                local action param
-                action=$(echo "$pending" | cut -d: -f1)
-                param=$(echo "$pending" | cut -d: -f2-)
-                case "$action" in
-                    enable) do_enable "$param" ;;
-                    delete) do_delete "$param" ;;
-                    reboot) do_reboot ;;
-                esac
+        # Navigation
+        menu:main)      clear_pending; send_main_menu ;;
+        menu:profiles)  send_profile_list ;;
+        menu:download)  send_download_prompt ;;
+        menu:notif)     send_notif_list ;;
+        menu:settings)  send_settings ;;
+        noop)           ;; # locked button, do nothing
+
+        # Actions
+        act:status)     send_modem_status ;;
+        act:notifprocess) do_notif_process ;;
+
+        # Profile switch (ask confirmation)
+        sw:*)
+            local iccid="${data#sw:}"
+            if [ "$ALLOW_DISRUPTIVE" != "1" ]; then
+                tg_send "⛔ Operasi disruptive dinonaktifkan."
+                return
+            fi
+            if [ "$REQUIRE_CONFIRM" = "1" ]; then
+                save_pending "switch" "$iccid"
+                tg_send_inline "⚠️ <b>Konfirmasi Switch Profile</b>
+
+ICCID: <code>$iccid</code>
+
+Internet akan TERPUTUS 30-60 detik.
+Lanjutkan?" \
+                    '[[{"text":"✅ Ya, Switch","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"cancel"}]]'
+            else
+                do_switch "$iccid"
             fi
             ;;
-        "confirm:no")
-            tg_answer_callback "$callback_id" "Dibatalkan"
-            rm -f "$CONFIRM_FILE"
-            tg_send "❌ Operasi dibatalkan."
+
+        # Profile delete (ask confirmation)
+        del:*)
+            local iccid="${data#del:}"
+            if [ "$ALLOW_DISRUPTIVE" != "1" ]; then
+                tg_send "⛔ Operasi disruptive dinonaktifkan."
+                return
+            fi
+            save_pending "delete" "$iccid"
+            tg_send_inline "🗑 <b>Konfirmasi Hapus Profile</b>
+
+ICCID: <code>$iccid</code>
+
+⚠️ Profile dihapus permanen!
+Lanjutkan?" \
+                '[[{"text":"🗑 Ya, Hapus","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"cancel"}]]'
             ;;
-        enable:*)
-            local iccid="${data#enable:}"
-            tg_answer_callback "$callback_id" "Switching..."
-            cmd_enable "$iccid"
+
+        # Confirmation
+        confirm:yes)
+            if load_pending; then
+                case "$PEND_ACTION" in
+                    switch)   do_switch "$PEND_ARG" ;;
+                    delete)   do_delete "$PEND_ARG" ;;
+                    download) do_download "$PEND_ARG" ;;
+                esac
+                clear_pending
+            else
+                tg_send "⚠️ Tidak ada operasi pending."
+            fi
+            ;;
+
+        cancel)
+            clear_pending
+            tg_send_inline "❌ Dibatalkan." \
+                '[[{"text":"📋 Profile List","callback_data":"menu:profiles"},{"text":"🏠 Menu","callback_data":"menu:main"}]]'
+            ;;
+
+        # Settings toggles
+        cfg:backend:*)
+            local be="${data#cfg:backend:}"
+            uci -q set lpac-esim.main.apdu_backend="$be"
+            uci -q commit lpac-esim
+            send_settings
+            ;;
+        cfg:toggle:*)
+            local key="${data#cfg:toggle:}"
+            local cur=$(uci -q get "lpac-esim.main.$key" || echo "0")
+            local new=$([ "$cur" = "1" ] && echo "0" || echo "1")
+            uci -q set "lpac-esim.main.$key=$new"
+            uci -q commit lpac-esim
+            send_settings
             ;;
     esac
 }
 
 ###############################################################################
-# Message Parser
+# Text Message Handler
+###############################################################################
+
+handle_message() {
+    local chat="$1" text="$2"
+
+    # Security: string compare (64-bit safe on 32-bit ARM)
+    [ -n "$CHAT_ID" ] && [ "$chat" != "$CHAT_ID" ] && {
+        # Only respond to /chatid for unauthorized users
+        case "$text" in /chatid|/start)
+            local payload
+            payload=$(jq -nc --arg c "$chat" --arg t "Your Chat ID: $chat" \
+                '{chat_id:$c, text:$t}')
+            tg_post "sendMessage" "$payload" >/dev/null
+        esac
+        return
+    }
+
+    # Check if we're waiting for input (download LPA string)
+    if load_pending && [ "$PEND_ACTION" = "download" ] && [ -z "$PEND_ARG" ]; then
+        case "$text" in
+            LPA:1\$*|lpa:1\$*)
+                save_pending "download" "$text"
+                tg_send_inline "📥 <b>Konfirmasi Download</b>
+
+<code>$text</code>
+
+Lanjutkan download?" \
+                    '[[{"text":"✅ Ya, Download","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"cancel"}]]'
+                ;;
+            *)
+                tg_send "⚠️ Format harus: <code>LPA:1\$server\$matchingId</code>
+
+Atau tap Batal."
+                ;;
+        esac
+        return
+    fi
+
+    # Parse command
+    local cmd arg
+    cmd=$(echo "$text" | awk '{print $1}')
+    arg=$(echo "$text" | cut -d' ' -f2- -s)
+
+    case "$cmd" in
+        # Slash commands
+        /start|/menu)       send_main_menu ;;
+        /help)              tg_send "📋 <b>Commands</b>
+
+/eid - Info eUICC
+/profiles - Daftar profile
+/status - Status modem
+/download &lt;LPA&gt; - Download profile
+/enable &lt;ICCID&gt; - Switch profile
+/delete &lt;ICCID&gt; - Hapus profile
+/notif - Proses notifikasi
+/settings - Pengaturan
+/chatid - Tampilkan Chat ID" ;;
+        /chatid)            tg_send "Chat ID: <code>$chat</code>" ;;
+        /eid|/info)         send_eid_info ;;
+        /profiles|/profile) send_profile_list ;;
+        /status)            send_modem_status ;;
+        /settings)          send_settings ;;
+        /notif)             do_notif_process ;;
+        /download)
+            if [ -n "$arg" ]; then
+                case "$arg" in LPA:1\$*|lpa:1\$*)
+                    save_pending "download" "$arg"
+                    tg_send_inline "📥 Konfirmasi download:
+<code>$arg</code>" \
+                        '[[{"text":"✅ Download","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"cancel"}]]'
+                    ;; *)
+                    tg_send "⚠️ Format: /download LPA:1\$server\$matchingId"
+                    ;; esac
+            else
+                send_download_prompt
+            fi ;;
+        /enable|/switch)
+            [ -z "$arg" ] && { tg_send "⚠️ Format: /enable &lt;ICCID&gt;"; return; }
+            if [ "$REQUIRE_CONFIRM" = "1" ]; then
+                save_pending "switch" "$arg"
+                tg_send_inline "⚠️ Switch ke <code>$arg</code>?" \
+                    '[[{"text":"✅ Ya","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"cancel"}]]'
+            else
+                do_switch "$arg"
+            fi ;;
+        /delete)
+            [ -z "$arg" ] && { tg_send "⚠️ Format: /delete &lt;ICCID&gt;"; return; }
+            save_pending "delete" "$arg"
+            tg_send_inline "🗑 Hapus <code>$arg</code>?" \
+                '[[{"text":"🗑 Ya","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"cancel"}]]'
+            ;;
+
+        # Keyboard button text (from persistent menu)
+        "📱 Info EID")       send_eid_info ;;
+        "📋 Profile List")   send_profile_list ;;
+        "📥 Download eSIM")  send_download_prompt ;;
+        "🔔 Notifications")  send_notif_list ;;
+        "📡 Modem Status")   send_modem_status ;;
+        "⚙️ Settings")       send_settings ;;
+        "❓ Help")           tg_send "/eid /profiles /status /download /enable /delete /notif /settings" ;;
+        "🏠 Menu"|"Menu Utama") send_main_menu ;;
+
+        # Unknown: show menu
+        *)  send_main_menu ;;
+    esac
+}
+
+###############################################################################
+# Update Processor
 ###############################################################################
 
 process_update() {
     local update="$1"
 
-    # Check for callback query (inline keyboard press)
-    local callback_id callback_data
-    callback_id=$(echo "$update" | jq -r '.callback_query.id // empty')
-    if [ -n "$callback_id" ]; then
-        callback_data=$(echo "$update" | jq -r '.callback_query.data // empty')
-        local cb_chat_id
-        cb_chat_id=$(echo "$update" | jq -r '.callback_query.message.chat.id // empty')
-        [ "$cb_chat_id" != "$CHAT_ID" ] && return
-        handle_callback "$callback_id" "$callback_data"
+    # Callback query (inline button tap)
+    local cb_id cb_data cb_chat
+    cb_id=$(echo "$update" | jq -r '.callback_query.id // empty')
+    if [ -n "$cb_id" ]; then
+        cb_data=$(echo "$update" | jq -r '.callback_query.data // empty')
+        cb_chat=$(echo "$update" | jq -r '.callback_query.message.chat.id | tostring')
+        handle_callback "$cb_id" "$cb_data" "$cb_chat"
         return
     fi
 
-    # Check for text message
-    local msg_chat_id msg_text
-    msg_chat_id=$(echo "$update" | jq -r '.message.chat.id // empty')
+    # Text message
+    local msg_chat msg_text
+    msg_chat=$(echo "$update" | jq -r '.message.chat.id | tostring')
     msg_text=$(echo "$update" | jq -r '.message.text // empty')
-
-    # Security: only respond to authorized chat
-    [ "$msg_chat_id" != "$CHAT_ID" ] && return
     [ -z "$msg_text" ] && return
 
-    # Parse command and argument
-    local cmd arg
-    cmd=$(echo "$msg_text" | awk '{print $1}' | tr 'A-Z' 'a-z')
-    arg=$(echo "$msg_text" | cut -d' ' -f2- -s)
-
-    log_debug "Command: $cmd Arg: $arg"
-
-    case "$cmd" in
-        /start)    cmd_start ;;
-        /help)     cmd_help ;;
-        /status)   cmd_status ;;
-        /eid)      cmd_eid ;;
-        /profiles) cmd_profiles ;;
-        /enable)   cmd_enable "$arg" ;;
-        /download) cmd_download "$arg" ;;
-        /delete)   cmd_delete "$arg" ;;
-        /reboot)   cmd_reboot ;;
-        /notif)    cmd_notif ;;
-        *)
-            # Ignore non-command messages silently
-            ;;
-    esac
+    handle_message "$msg_chat" "$msg_text"
 }
 
 ###############################################################################
 # Main Loop
 ###############################################################################
 
-save_state() {
-    echo "$LAST_UPDATE_ID" > "$STATE_FILE"
-}
-
-load_state() {
-    [ -f "$STATE_FILE" ] && LAST_UPDATE_ID=$(cat "$STATE_FILE")
-}
-
 cleanup() {
-    save_state
+    save_offset
+    write_status "stopped" 0
     rm -f "$PID_FILE"
-    log "Bot stopped"
+    log_msg "stopped"
     exit 0
 }
 
 main() {
-    # Init
     mkdir -p "$STATE_DIR"
     load_config || exit 1
-
-    # Re-set API URL after config load (token now available)
     TG_API="https://api.telegram.org/bot${BOT_TOKEN}"
-
-    load_state
+    load_offset
     echo $$ > "$PID_FILE"
     trap cleanup INT TERM
 
-    log "Bot started (poll_interval=${POLL_INTERVAL}s, chat_id=${CHAT_ID})"
+    log_msg "Bot started (poll=${POLL_INTERVAL}s, chat_id=${CHAT_ID})"
+    write_status "starting" 0
 
-    # Main polling loop
+    local consecutive_fail=0
+
     while true; do
         local offset=$((LAST_UPDATE_ID + 1))
         local response
 
-        response=$(curl -s -m $((POLL_TIMEOUT + 5)) \
+        response=$(curl -s -m $((POLL_TIMEOUT + 10)) \
             "${TG_API}/getUpdates?offset=${offset}&timeout=${POLL_TIMEOUT}&allowed_updates=%5B%22message%22%2C%22callback_query%22%5D" \
             2>/dev/null)
 
         if [ -z "$response" ]; then
-            log_debug "Empty response from Telegram (network issue?)"
-            sleep "$POLL_INTERVAL"
+            consecutive_fail=$((consecutive_fail + 1))
+            write_status "error" "$consecutive_fail"
+            [ $((consecutive_fail % 10)) -eq 1 ] && log_msg "getUpdates empty (fail=$consecutive_fail)"
+            sleep 10
             continue
         fi
 
         local ok
-        ok=$(echo "$response" | jq -r '.ok' 2>/dev/null)
+        ok=$(echo "$response" | jq -r '.ok')
         if [ "$ok" != "true" ]; then
-            log "Telegram API error: $(echo "$response" | jq -r '.description // "unknown"' 2>/dev/null)"
-            sleep "$POLL_INTERVAL"
+            consecutive_fail=$((consecutive_fail + 1))
+            write_status "error" "$consecutive_fail"
+            [ $((consecutive_fail % 10)) -eq 1 ] && log_msg "API error: $(echo "$response" | jq -r '.description // "?"')"
+            sleep 10
             continue
         fi
 
-        # Process each update
-        local updates_count
-        updates_count=$(echo "$response" | jq '.result | length' 2>/dev/null)
+        consecutive_fail=0
+        write_status "ok" 0
 
-        if [ -n "$updates_count" ] && [ "$updates_count" -gt 0 ]; then
+        # Process updates
+        local count
+        count=$(echo "$response" | jq '.result | length')
+        if [ -n "$count" ] && [ "$count" -gt 0 ]; then
             local idx=0
-            while [ $idx -lt "$updates_count" ]; do
-                local update update_id
+            while [ $idx -lt "$count" ]; do
+                local update uid
                 update=$(echo "$response" | jq ".result[$idx]")
-                update_id=$(echo "$update" | jq -r '.update_id')
-
-                if [ "$update_id" -gt "$LAST_UPDATE_ID" ]; then
-                    LAST_UPDATE_ID=$update_id
+                uid=$(echo "$update" | jq -r '.update_id')
+                [ "$uid" -gt "$LAST_UPDATE_ID" ] && {
+                    LAST_UPDATE_ID=$uid
                     process_update "$update"
-                fi
-
+                }
                 idx=$((idx + 1))
             done
-            save_state
+            save_offset
         fi
 
-        # Small sleep between polls to avoid hammering on rapid responses
-        sleep 1
+        sleep "$POLL_INTERVAL"
     done
 }
 
