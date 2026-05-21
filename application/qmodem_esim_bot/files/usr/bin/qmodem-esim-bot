@@ -184,42 +184,20 @@ send_eid_info() {
     chip_raw=$(lpac_api chip)
     prof_raw=$(lpac_api profiles)
 
-    local eid svn fw free_nv free_v apps smdp smds prof_count
+    local eid fw free_nv prof_count
     eid=$(echo "$chip_raw" | jq -r '.payload.data.eidValue // "-"')
-    svn=$(echo "$chip_raw" | jq -r '.payload.data.EUICCInfo2.svn // "-"')
     fw=$(echo "$chip_raw" | jq -r '.payload.data.EUICCInfo2.euiccFirmwareVer // "-"')
     free_nv=$(echo "$chip_raw" | jq -r '.payload.data.EUICCInfo2.extCardResource.freeNonVolatileMemory // "-"')
-    free_v=$(echo "$chip_raw" | jq -r '.payload.data.EUICCInfo2.extCardResource.freeVolatileMemory // "-"')
-    apps=$(echo "$chip_raw" | jq -r '.payload.data.EUICCInfo2.extCardResource.installedApplication // "0"')
-    smdp=$(echo "$chip_raw" | jq -r '.payload.data.EuiccConfiguredAddresses.defaultDpAddress // "Not set"')
-    smds=$(echo "$chip_raw" | jq -r '.payload.data.EuiccConfiguredAddresses.rootDsAddress // "-"')
     prof_count=$(echo "$prof_raw" | jq -r '.payload.data | length // 0' 2>/dev/null)
     [ -z "$prof_count" ] && prof_count=0
 
-    # Format memory
-    local nv_kb=""
-    [ "$free_nv" != "-" ] && nv_kb="$(echo "$free_nv / 1024" | bc 2>/dev/null || echo "$free_nv") KB"
-    [ -z "$nv_kb" ] && nv_kb="$free_nv B"
+    local nv_display="$free_nv B"
+    [ "$free_nv" != "-" ] && [ "$free_nv" -gt 1024 ] 2>/dev/null && nv_display="$((free_nv / 1024)) KB"
 
-    local text="📱 <b>eUICC / eSIM Chip Info</b>
-
-🔑 <b>EID:</b>
+    tg_send_inline "📱 <b>EID:</b>
 <code>$eid</code>
-
-📊 <b>Chip Info:</b>
-  • SVN: <code>$svn</code>
-  • Firmware: <code>$fw</code>
-  • SM-DP+: <code>$smdp</code>
-  • SM-DS: <code>$smds</code>
-
-💾 <b>Storage:</b>
-  • Free NV: $nv_kb
-  • Free RAM: $free_v B
-  • Apps: $apps
-
-📂 <b>Profiles:</b> $prof_count tersimpan"
-
-    tg_send_inline "$text" '[[{"text":"📋 Profile List","callback_data":"menu:profiles"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
+FW: $fw | Free: $nv_display | Profiles: $prof_count" \
+        '[[{"text":"📋 Profiles","callback_data":"menu:profiles"},{"text":"🏠 Menu","callback_data":"menu:main"}]]'
 }
 
 ###############################################################################
@@ -234,40 +212,25 @@ send_profile_list() {
     [ -z "$count" ] || [ "$count" = "null" ] && count=0
 
     if [ "$count" = "0" ]; then
-        tg_send_inline "📋 <b>Profile List</b>
-
-Tidak ada eSIM profile tersimpan." \
+        tg_send_inline "📋 No profiles." \
             '[[{"text":"📥 Download eSIM","callback_data":"menu:download"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
         return
     fi
 
-    # Build message text and keyboard JSON
-    local text="📋 <b>Profile List eSIM</b> ($count profil)
-
-🔵 = Aktif (locked)
-🔴 = Tidak aktif (tap untuk switch)
-"
-    local kb_rows="" i=0 active_iccid="" inactive_row=""
+    local text="📋 <b>Profiles</b> ($count)"
+    local kb_rows="" i=0 inactive_row=""
 
     while [ $i -lt "$count" ]; do
-        local state name iccid provider
+        local state name iccid
         state=$(echo "$raw" | jq -r ".payload.data[$i].profileState")
         name=$(echo "$raw" | jq -r ".payload.data[$i].profileNickname // .payload.data[$i].profileName // \"Profile $((i+1))\"")
         iccid=$(echo "$raw" | jq -r ".payload.data[$i].iccid")
-        provider=$(echo "$raw" | jq -r ".payload.data[$i].serviceProviderName // \"-\"")
 
         if [ "$state" = "enabled" ]; then
-            active_iccid="$iccid"
-            text="${text}
-✅ <b>$name</b> ($provider)
-    <code>$iccid</code>"
-            # Active profile: full-width row (blue/locked)
+            # Active: full-width blue button (locked)
             kb_rows="${kb_rows}[{\"text\":\"✅ $name 🔒\",\"callback_data\":\"noop\"}],"
         else
-            text="${text}
-⬜ $name ($provider)
-    <code>$iccid</code>"
-            # Inactive: collect 2 per row
+            # Inactive: 2 per row, red
             if [ -z "$inactive_row" ]; then
                 inactive_row="{\"text\":\"🔴 $name\",\"callback_data\":\"sw:$iccid\"}"
             else
@@ -280,12 +243,11 @@ Tidak ada eSIM profile tersimpan." \
     # Flush remaining single inactive button
     [ -n "$inactive_row" ] && kb_rows="${kb_rows}[$inactive_row],"
 
-    # Add action buttons at bottom
-    kb_rows="${kb_rows}[{\"text\":\"⚡ Manage Profile\",\"callback_data\":\"menu:manage\"},{\"text\":\"📥 Download\",\"callback_data\":\"menu:download\"}],"
-    kb_rows="${kb_rows}[{\"text\":\"🔔 Process Notif\",\"callback_data\":\"act:notifprocess\"},{\"text\":\"🏠 Menu\",\"callback_data\":\"menu:main\"}]"
+    # Bottom action buttons
+    kb_rows="${kb_rows}[{\"text\":\"⚡ Manage\",\"callback_data\":\"menu:manage\"},{\"text\":\"📥 Download\",\"callback_data\":\"menu:download\"}],"
+    kb_rows="${kb_rows}[{\"text\":\"🔔 Notif\",\"callback_data\":\"act:notifprocess\"},{\"text\":\"🏠 Menu\",\"callback_data\":\"menu:main\"}]"
 
-    local kb="[${kb_rows}]"
-    tg_send_inline "$text" "$kb"
+    tg_send_inline "$text" "[${kb_rows}]"
 }
 
 ###############################################################################
@@ -302,14 +264,9 @@ send_modem_status() {
     sig=$(echo "$raw" | jq -r '.payload.data.signal_quality // "-"')
     state=$(echo "$raw" | jq -r '.payload.data.state // "-"')
 
-    tg_send_inline "📡 <b>Modem Status</b>
-
-Model: <code>$model</code>
-Operator: <b>$op</b>
-Technology: $tech
-Signal: $sig
-State: $state" \
-        '[[{"text":"🔄 Refresh","callback_data":"act:status"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
+    tg_send_inline "📡 <b>$model</b> | $op | $tech
+Signal: $sig | $state" \
+        '[[{"text":"🔄 Refresh","callback_data":"act:status"},{"text":"🏠 Menu","callback_data":"menu:main"}]]'
 }
 
 ###############################################################################
@@ -322,32 +279,27 @@ send_settings() {
     proxy=$(uci -q get lpac-esim.main.mbim_proxy || echo "1")
     skip_slot=$(uci -q get lpac-esim.main.skip_slot_mapping || echo "1")
     debug_on=$(uci -q get lpac-esim.main.apdu_debug || echo "0")
-    local allow_d="$ALLOW_DISRUPTIVE"
-    local req_c="$REQUIRE_CONFIRM"
 
     local p_icon="🔴" s_icon="🔴" d_icon="🔴"
     [ "$proxy" = "1" ] && p_icon="🔵"
     [ "$skip_slot" = "1" ] && s_icon="🔵"
     [ "$debug_on" = "1" ] && d_icon="🔵"
 
-    local text="⚙️ <b>Settings</b>
+    # Backend buttons: active one is blue emoji, others red
+    local qmi_i="🔴" mbim_i="🔴" at_i="🔴"
+    case "$backend" in
+        qmi)  qmi_i="🔵" ;;
+        mbim) mbim_i="🔵" ;;
+        at)   at_i="🔵" ;;
+    esac
 
-<b>APDU Backend:</b> <code>$backend</code>
-<b>MBIM Proxy:</b> $p_icon $([ "$proxy" = "1" ] && echo ON || echo OFF)
-<b>Skip Slot Mapping:</b> $s_icon $([ "$skip_slot" = "1" ] && echo ON || echo OFF)
-<b>Debug:</b> $d_icon $([ "$debug_on" = "1" ] && echo ON || echo OFF)
-<b>Allow Disruptive:</b> $([ "$allow_d" = "1" ] && echo "✅ Yes" || echo "❌ No")
-<b>Require Confirm:</b> $([ "$req_c" = "1" ] && echo "✅ Yes" || echo "❌ No")
-
-Tap tombol untuk toggle/ubah:"
-
-    local kb='[
-        [{"text":"Backend: QMI","callback_data":"cfg:backend:qmi"},{"text":"Backend: MBIM","callback_data":"cfg:backend:mbim"},{"text":"Backend: AT","callback_data":"cfg:backend:at"}],
-        [{"text":"'"$p_icon"' MBIM Proxy","callback_data":"cfg:toggle:mbim_proxy"},{"text":"'"$s_icon"' Skip Slot","callback_data":"cfg:toggle:skip_slot_mapping"}],
-        [{"text":"'"$d_icon"' Debug","callback_data":"cfg:toggle:apdu_debug"}],
-        [{"text":"🏠 Menu","callback_data":"menu:main"}]
-    ]'
-    tg_send_inline "$text" "$kb"
+    local kb="[
+        [{\"text\":\"$qmi_i QMI\",\"callback_data\":\"cfg:backend:qmi\"},{\"text\":\"$mbim_i MBIM\",\"callback_data\":\"cfg:backend:mbim\"},{\"text\":\"$at_i AT\",\"callback_data\":\"cfg:backend:at\"}],
+        [{\"text\":\"$p_icon Proxy\",\"callback_data\":\"cfg:toggle:mbim_proxy\"},{\"text\":\"$s_icon Skip Slot\",\"callback_data\":\"cfg:toggle:skip_slot_mapping\"}],
+        [{\"text\":\"$d_icon Debug\",\"callback_data\":\"cfg:toggle:apdu_debug\"}],
+        [{\"text\":\"🏠 Menu\",\"callback_data\":\"menu:main\"}]
+    ]"
+    tg_send_inline "⚙️ <b>Settings</b> | Backend: <code>$backend</code>" "$kb"
 }
 
 ###############################################################################
@@ -373,16 +325,13 @@ Atau tap Batal." \
 send_notif_list() {
     local raw
     raw=$(lpac_api notif-list)
-    local code
+    local code count
     code=$(echo "$raw" | jq -r '.payload.code // 99')
     if [ "$code" = "0" ]; then
-        local count
         count=$(echo "$raw" | jq -r '.payload.data | length // 0' 2>/dev/null)
         [ -z "$count" ] && count=0
-        tg_send_inline "🔔 <b>Notifications</b>
-
-Pending: $count notifikasi" \
-            '[[{"text":"⚡ Process All","callback_data":"act:notifprocess"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
+        tg_send_inline "🔔 Pending: $count" \
+            '[[{"text":"⚡ Process All","callback_data":"act:notifprocess"},{"text":"🏠 Menu","callback_data":"menu:main"}]]'
     else
         tg_send_inline "❌ Gagal baca notifikasi." '[[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
     fi
@@ -400,17 +349,10 @@ send_manage_menu() {
     [ -z "$count" ] || [ "$count" = "null" ] && count=0
 
     if [ "$count" = "0" ]; then
-        tg_send_inline "🗑 <b>Manage Profile</b>
-
-Tidak ada profile." '[[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
+        tg_send_inline "🗑 No profiles." '[[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
         return
     fi
 
-    local text="🗑 <b>Manage Profile</b>
-
-⚠️ Profile <b>ACTIVE</b> dikunci (tidak bisa dihapus).
-Tap tombol 🗑 untuk hapus profile disabled.
-"
     local kb_rows="" i=0 has_disabled=0
 
     while [ $i -lt "$count" ]; do
@@ -419,12 +361,7 @@ Tap tombol 🗑 untuk hapus profile disabled.
         name=$(echo "$raw" | jq -r ".payload.data[$i].profileNickname // .payload.data[$i].profileName // \"Profile $((i+1))\"")
         iccid=$(echo "$raw" | jq -r ".payload.data[$i].iccid")
 
-        if [ "$state" = "enabled" ]; then
-            text="${text}
-🔵 <b>$name</b> 🔒"
-        else
-            text="${text}
-🔴 $name"
+        if [ "$state" != "enabled" ]; then
             kb_rows="${kb_rows}[{\"text\":\"🗑 $name\",\"callback_data\":\"del:$iccid\"}],"
             has_disabled=1
         fi
@@ -432,11 +369,13 @@ Tap tombol 🗑 untuk hapus profile disabled.
     done
 
     if [ "$has_disabled" = "0" ]; then
-        kb_rows='[{"text":"Tidak ada profile disabled","callback_data":"noop"}],'
+        tg_send_inline "🗑 Semua profile aktif, tidak bisa dihapus." \
+            '[[{"text":"📋 Profiles","callback_data":"menu:profiles"},{"text":"🏠 Menu","callback_data":"menu:main"}]]'
+        return
     fi
 
-    kb_rows="${kb_rows}[{\"text\":\"📋 Profile List\",\"callback_data\":\"menu:profiles\"},{\"text\":\"🏠 Menu\",\"callback_data\":\"menu:main\"}]"
-    tg_send_inline "$text" "[${kb_rows}]"
+    kb_rows="${kb_rows}[{\"text\":\"📋 Profiles\",\"callback_data\":\"menu:profiles\"},{\"text\":\"🏠 Menu\",\"callback_data\":\"menu:main\"}]"
+    tg_send_inline "🗑 <b>Delete Profile</b>" "[${kb_rows}]"
 }
 
 ###############################################################################
@@ -714,28 +653,32 @@ handle_message() {
         case "$text" in
             LPA:1\$*|lpa:1\$*)
                 save_pending "download" "$text"
-                tg_send_inline "📥 <b>Konfirmasi Download</b>
-
-<code>$text</code>
-
-Lanjutkan download?" \
-                    '[[{"text":"✅ Ya, Download","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"cancel"}]]'
+                tg_send_inline "📥 Download ini?" \
+                    '[[{"text":"✅ Ya","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"cancel"}]]'
+                ;;
+            /cancel)
+                clear_pending
+                send_main_menu
                 ;;
             *)
-                tg_send "⚠️ Format harus: <code>LPA:1\$server\$matchingId</code>
-
-Atau tap Batal."
+                tg_send "⚠️ Format: <code>LPA:1\$server\$matchingId</code>"
                 ;;
         esac
         return
     fi
 
-    # Parse command
-    local cmd arg
-    cmd=$(echo "$text" | awk '{print $1}')
-    arg=$(echo "$text" | cut -d' ' -f2- -s)
+    # Match full text first (keyboard buttons + slash commands)
+    case "$text" in
+        # Keyboard buttons (exact match including emoji)
+        "📱 Info EID")       send_eid_info ;;
+        "📋 Profile List")   send_profile_list ;;
+        "📥 Download eSIM")  send_download_prompt ;;
+        "🔔 Notifications")  send_notif_list ;;
+        "📡 Modem Status")   send_modem_status ;;
+        "⚙️ Settings")       send_settings ;;
+        "❓ Help")           tg_send "/eid /profiles /status /download /enable /delete /notif /settings" ;;
+        "🏠 Menu"|"Menu Utama"|"Menu") send_main_menu ;;
 
-    case "$cmd" in
         # Slash commands
         /start|/menu)       send_main_menu ;;
         /help)              tg_send "📋 <b>Commands</b>
@@ -755,20 +698,21 @@ Atau tap Batal."
         /status)            send_modem_status ;;
         /settings)          send_settings ;;
         /notif)             do_notif_process ;;
-        /download)
-            if [ -n "$arg" ]; then
-                case "$arg" in LPA:1\$*|lpa:1\$*)
-                    save_pending "download" "$arg"
-                    tg_send_inline "📥 Konfirmasi download:
-<code>$arg</code>" \
-                        '[[{"text":"✅ Download","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"cancel"}]]'
-                    ;; *)
-                    tg_send "⚠️ Format: /download LPA:1\$server\$matchingId"
-                    ;; esac
-            else
-                send_download_prompt
-            fi ;;
-        /enable|/switch)
+        /cancel)            clear_pending; send_main_menu ;;
+        /download\ *)
+            local arg="${text#/download }"
+            case "$arg" in LPA:1\$*|lpa:1\$*)
+                save_pending "download" "$arg"
+                tg_send_inline "📥 Download ini?" \
+                    '[[{"text":"✅ Ya","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"cancel"}]]'
+                ;; *)
+                tg_send "⚠️ Format: /download LPA:1\$server\$matchingId"
+                ;; esac
+            ;;
+        /download)          send_download_prompt ;;
+        /enable\ *|/switch\ *)
+            local arg="${text#/enable }"
+            [ "$arg" = "$text" ] && arg="${text#/switch }"
             [ -z "$arg" ] && { tg_send "⚠️ Format: /enable &lt;ICCID&gt;"; return; }
             if [ "$REQUIRE_CONFIRM" = "1" ]; then
                 save_pending "switch" "$arg"
@@ -777,22 +721,15 @@ Atau tap Batal."
             else
                 do_switch "$arg"
             fi ;;
-        /delete)
+        /enable|/switch)    tg_send "⚠️ Format: /enable &lt;ICCID&gt;" ;;
+        /delete\ *)
+            local arg="${text#/delete }"
             [ -z "$arg" ] && { tg_send "⚠️ Format: /delete &lt;ICCID&gt;"; return; }
             save_pending "delete" "$arg"
             tg_send_inline "🗑 Hapus <code>$arg</code>?" \
                 '[[{"text":"🗑 Ya","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"cancel"}]]'
             ;;
-
-        # Keyboard button text (from persistent menu)
-        "📱 Info EID")       send_eid_info ;;
-        "📋 Profile List")   send_profile_list ;;
-        "📥 Download eSIM")  send_download_prompt ;;
-        "🔔 Notifications")  send_notif_list ;;
-        "📡 Modem Status")   send_modem_status ;;
-        "⚙️ Settings")       send_settings ;;
-        "❓ Help")           tg_send "/eid /profiles /status /download /enable /delete /notif /settings" ;;
-        "🏠 Menu"|"Menu Utama") send_main_menu ;;
+        /delete)            tg_send "⚠️ Format: /delete &lt;ICCID&gt;" ;;
 
         # Unknown: show menu
         *)  send_main_menu ;;
