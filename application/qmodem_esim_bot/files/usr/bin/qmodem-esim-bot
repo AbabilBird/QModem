@@ -846,6 +846,52 @@ do_notif_process() {
     fi
 }
 
+do_simslot() {
+    local slot="$1"
+    tg_send "⏳ Switching SIM slot..."
+    local modem_sec=$(get_modem_section)
+    local at_port=$(uci -q get "qmodem.${modem_sec}.at_port")
+    local manufacturer=$(uci -q get "qmodem.${modem_sec}.manufacturer")
+
+    if [ -z "$at_port" ] || [ ! -e "$at_port" ] || [ ! -x /usr/bin/sms_tool_q ]; then
+        tg_send_inline "❌ AT port not available." \
+            '[[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
+        return
+    fi
+
+    local at_cmd=""
+    case "$manufacturer" in
+        foxconn) at_cmd="AT^SWITCH_SLOT=$slot" ;;
+        quectel) at_cmd="AT+QUIMSLOT=$slot" ;;
+        *)       at_cmd="AT^SWITCH_SLOT=$slot" ;;
+    esac
+
+    local resp
+    resp=$(sms_tool_q -d "$at_port" at "$at_cmd" 2>/dev/null)
+
+    local slot_name="Slot $slot"
+    [ "$manufacturer" = "foxconn" ] && {
+        [ "$slot" = "0" ] && slot_name="SIM Card"
+        [ "$slot" = "1" ] && slot_name="eSIM"
+    }
+
+    if echo "$resp" | grep -qi "OK"; then
+        uci -q set "qmodem.${modem_sec}.sim_slot=$slot"
+        uci -q commit qmodem
+        tg_send_inline "✅ <b>SIM Slot Switched</b>
+
+Aktif: <b>$slot_name</b>
+Modem akan reconnect dalam beberapa detik." \
+            "[[{\"text\":\"🔄 SIM Switch\",\"callback_data\":\"menu:simswitch\",\"style\":\"primary\"},{\"text\":\"📱 EID Info\",\"callback_data\":\"menu:eid\"}],[{\"text\":\"🏠 Menu\",\"callback_data\":\"menu:main\"}]]"
+    else
+        tg_send_inline "❌ <b>SIM Switch Gagal</b>
+
+Command: <code>$at_cmd</code>
+Modem mungkin tidak support atau slot tidak tersedia." \
+            "[[{\"text\":\"🔄 Retry\",\"callback_data\":\"menu:simswitch\"},{\"text\":\"🏠 Menu\",\"callback_data\":\"menu:main\"}]]"
+    fi
+}
+
 ###############################################################################
 # Callback Query Handler (inline keyboard button taps)
 ###############################################################################
@@ -875,37 +921,23 @@ handle_callback() {
         # SIM Slot switch
         simslot:*)
             local slot="${data#simslot:}"
-            tg_answer_cb "$cb_id" "Switching to slot $slot..."
+            tg_answer_cb "$cb_id" ""
+            # Ask confirmation before switching SIM slot
             local modem_sec=$(get_modem_section)
-            local at_port=$(uci -q get "qmodem.${modem_sec}.at_port")
             local manufacturer=$(uci -q get "qmodem.${modem_sec}.manufacturer")
-            if [ -n "$at_port" ] && [ -e "$at_port" ] && [ -x /usr/bin/sms_tool_q ]; then
-                local at_cmd=""
-                case "$manufacturer" in
-                    foxconn) at_cmd="AT^SWITCH_SLOT=$slot" ;;
-                    quectel) at_cmd="AT+QUIMSLOT=$slot" ;;
-                    *)       at_cmd="AT^SWITCH_SLOT=$slot" ;;
-                esac
-                local resp
-                resp=$(sms_tool_q -d "$at_port" at "$at_cmd" 2>/dev/null)
-                if echo "$resp" | grep -qi "OK"; then
-                    uci -q set "qmodem.${modem_sec}.sim_slot=$slot"
-                    uci -q commit qmodem
-                    local slot_name="Slot $slot"
-                    [ "$manufacturer" = "foxconn" ] && {
-                        [ "$slot" = "0" ] && slot_name="SIM Card"
-                        [ "$slot" = "1" ] && slot_name="eSIM"
-                    }
-                    tg_send_inline "✅ Switched to <b>$slot_name</b>.
-Modem will reconnect." \
-                        "[[{\"text\":\"🔄 SIM Switch\",\"callback_data\":\"menu:simswitch\",\"style\":\"primary\"},{\"text\":\"🏠 Menu\",\"callback_data\":\"menu:main\"}]]"
-                else
-                    tg_send_inline "❌ SIM switch failed." \
-                        "[[{\"text\":\"🔄 Retry\",\"callback_data\":\"menu:simswitch\"},{\"text\":\"🏠 Menu\",\"callback_data\":\"menu:main\"}]]"
-                fi
-            else
-                tg_send "❌ AT port not available."
-            fi
+            local slot_name="Slot $slot"
+            [ "$manufacturer" = "foxconn" ] && {
+                [ "$slot" = "0" ] && slot_name="SIM Card (physical)"
+                [ "$slot" = "1" ] && slot_name="eSIM"
+            }
+            save_pending "simslot" "$slot"
+            tg_send_inline "⚠️ <b>Konfirmasi Switch SIM Slot</b>
+
+Target: <b>$slot_name</b>
+
+⚠️ Internet akan terputus sementara.
+Lanjutkan?" \
+                '[[{"text":"✅ Ya, Switch","callback_data":"confirm:yes","style":"success"},{"text":"❌ Batal","callback_data":"cancel","style":"danger"}]]'
             ;;
 
         # Profile switch (ask confirmation)
@@ -956,6 +988,7 @@ Lanjutkan?" \
                     switch)   do_switch "$PEND_ARG" ;;
                     delete)   do_delete "$PEND_ARG" ;;
                     download) do_download "$PEND_ARG" ;;
+                    simslot)  do_simslot "$PEND_ARG" ;;
                 esac
                 clear_pending
             else
