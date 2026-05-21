@@ -772,13 +772,34 @@ Mohon tunggu..."
 Menunggu hasil (max 3 menit)..."
         local lock_result
         lock_result=$(poll_lock_result 180)
-        if [ $? -eq 0 ] && [ -n "$lock_result" ]; then
-            local success
-            success=$(echo "$lock_result" | jq -r '.success // true' 2>/dev/null)
-            if [ "$success" = "false" ]; then
+        local poll_rc=$?
+        if [ $poll_rc -eq 0 ]; then
+            # Check result: look for explicit failure indicators
+            local is_error=0
+            if [ -z "$lock_result" ]; then
+                # Empty result but lock released — check lock-status one more time for message
+                local final_check
+                final_check=$(lpac_api lock-status)
+                local final_msg=$(echo "$final_check" | jq -r '.payload.data.last_result.message // .payload.message // ""' 2>/dev/null)
+                if echo "$final_msg" | grep -qi "fail\|error\|FAILED"; then
+                    is_error=1
+                    lock_result="$final_msg"
+                fi
+            else
+                # Has result — check for failure
+                local res_success=$(echo "$lock_result" | jq -r '.success // empty' 2>/dev/null)
+                local res_msg=$(echo "$lock_result" | jq -r '.message // empty' 2>/dev/null)
+                if [ "$res_success" = "false" ] || [ "$res_success" = "error" ] || \
+                   echo "$res_msg" | grep -qi "fail\|error\|FAILED"; then
+                    is_error=1
+                    [ -n "$res_msg" ] && lock_result="$res_msg"
+                fi
+            fi
+
+            if [ "$is_error" = "1" ]; then
                 tg_send_inline "❌ <b>Download Gagal</b>
 
-$(echo "$lock_result" | jq -r '.message // "Unknown error"' 2>/dev/null)" \
+$lock_result" \
                     '[[{"text":"📥 Coba Lagi","callback_data":"menu:download"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
             else
                 tg_send_inline "✅ <b>Profile Downloaded</b>
@@ -788,10 +809,10 @@ Jalankan Process Notifications jika profile belum aktif." \
                     '[[{"text":"📋 Profile List","callback_data":"menu:profiles"},{"text":"🔔 Process Notif","callback_data":"act:notifprocess"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
             fi
         else
-            tg_send_inline "⚠️ <b>Download masih diproses</b>
+            tg_send_inline "⚠️ <b>Download timeout</b>
 
 Backend belum selesai setelah 3 menit.
-Cek Profile List untuk status terbaru." \
+Cek Profile List untuk status." \
                 '[[{"text":"📋 Profile List","callback_data":"menu:profiles"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
         fi
         return
