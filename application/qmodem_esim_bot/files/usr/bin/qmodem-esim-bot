@@ -764,7 +764,7 @@ Error: $err" \
 
 do_delete() {
     local iccid="$1"
-    tg_send "⏳ Menghapus profile..."
+    tg_send "⏳"
     local section result status
     section=$(get_modem_section)
     if [ -n "$section" ]; then
@@ -786,8 +786,7 @@ do_delete() {
 
 do_download() {
     local lpa="$1"
-    tg_send "⏳ <b>Downloading profile...</b>
-Mohon tunggu..."
+    tg_send "⏳"
     local result code msg
     result=$(lpac_api download --lpa "$lpa")
     code=$(echo "$result" | jq -r '.payload.code // 99')
@@ -795,8 +794,6 @@ Mohon tunggu..."
 
     # Check if backend returned "processing" (async operation)
     if [ "$msg" = "processing" ]; then
-        tg_send "⏳ Download sedang diproses...
-Menunggu hasil..."
         # Poll immediately first (operation may fail fast before 5s delay)
         sleep 2
         local lock_result="" poll_rc=0
@@ -874,7 +871,7 @@ Error: $msg" \
 }
 
 do_notif_process() {
-    tg_send "⏳ Memproses notifikasi..."
+    tg_send "⏳"
     local result code
     result=$(lpac_api notif-process)
     code=$(echo "$result" | jq -r '.payload.code // 99')
