@@ -199,7 +199,7 @@ send_main_menu() {
     ]'
     tg_send_keyboard "<b>QModem eSIM Bot v${APP_VER}</b>
 
-Pilih menu di bawah atau ketik perintah." "$kb"
+Select a menu below or type a command." "$kb"
 }
 
 ###############################################################################
@@ -242,7 +242,7 @@ send_eid_info() {
   • Free RAM: $free_v B
   • Apps: $apps
 
-📂 <b>Profiles:</b> $prof_count tersimpan"
+📂 <b>Profiles:</b> $prof_count stored"
 
     # Get current SIM slot info for SIM Switch button
     local sim_slot_text="SIM Switch"
@@ -536,11 +536,11 @@ send_download_prompt() {
     save_pending "download" ""
     tg_send_inline "📥 <b>Download eSIM</b>
 
-Kirim activation code format:
+Send activation code in format:
 <code>LPA:1\$smdp.example.com\$MATCHING-ID</code>
 
-Atau tap Batal." \
-        '[[{"text":"❌ Batal","callback_data":"cancel"}]]'
+Or tap Cancel." \
+        '[[{"text":"❌ Cancel","callback_data":"cancel"}]]'
 }
 
 ###############################################################################
@@ -558,7 +558,7 @@ send_notif_list() {
         tg_send_inline "🔔 Pending: $count" \
             '[[{"text":"⚡ Process All","callback_data":"act:notifprocess"},{"text":"🏠 Menu","callback_data":"menu:main"}]]'
     else
-        tg_send_inline "❌ Gagal baca notifikasi." '[[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
+        tg_send_inline "❌ Failed to read notifications." '[[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
     fi
 }
 
@@ -594,7 +594,7 @@ send_manage_menu() {
     done
 
     if [ "$has_disabled" = "0" ]; then
-        tg_send_inline "🗑 Semua profile aktif, tidak bisa dihapus." \
+        tg_send_inline "🗑 All profiles are active, cannot delete." \
             '[[{"text":"📋 Profiles","callback_data":"menu:profiles"},{"text":"🏠 Menu","callback_data":"menu:main"}]]'
         return
     fi
@@ -737,7 +737,7 @@ send_rename_menu() {
     kb_rows="${kb_rows}[{\"text\":\"📋 Profiles\",\"callback_data\":\"menu:profiles\"},{\"text\":\"🏠 Menu\",\"callback_data\":\"menu:main\"}]"
     tg_send_inline "✏️ <b>Rename Profile</b>
 
-Pilih profile untuk rename:" "[${kb_rows}]"
+Select profile to rename:" "[${kb_rows}]"
 }
 
 ###############################################################################
@@ -788,7 +788,7 @@ Internet reconnected." \
     else
         local err
         err=$(echo "$result" | jq -r '.result.error // "Unknown"')
-        tg_send_retry "❌ <b>Switch Gagal</b>
+        tg_send_retry "❌ <b>Switch Failed</b>
 
 Error: $err" \
             '[[{"text":"📋 Profile List","callback_data":"menu:profiles"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
@@ -807,12 +807,12 @@ do_delete() {
     fi
     status=$(echo "$result" | jq -r '.result.status // "0"')
     if [ "$status" = "1" ]; then
-        tg_send_inline "✅ Profile dihapus." \
+        tg_send_inline "✅ Profile deleted." \
             '[[{"text":"📋 Profile List","callback_data":"menu:profiles"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
     else
         local err
         err=$(echo "$result" | jq -r '.result.error // "Unknown"')
-        tg_send_inline "❌ Gagal hapus: $err" \
+        tg_send_inline "❌ Delete failed: $err" \
             '[[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
     fi
 }
@@ -871,19 +871,19 @@ do_download() {
         fi
 
         if [ "$is_error" = "1" ]; then
-            tg_send_inline "❌ <b>Download Gagal</b>
+            tg_send_inline "❌ <b>Download Failed</b>
 
 $lock_result" \
-                '[[{"text":"📥 Coba Lagi","callback_data":"menu:download"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
+                '[[{"text":"📥 Try Again","callback_data":"menu:download"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
         elif [ $poll_rc -eq 124 ]; then
             tg_send_inline "⚠️ <b>Download timeout</b>
 
-Cek Profile List untuk status." \
+Check Profile List for status." \
                 '[[{"text":"📋 Profile List","callback_data":"menu:profiles"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
         else
             tg_send_inline "✅ <b>Profile Downloaded</b>
 
-Gunakan Profile List untuk melihat dan switch." \
+Use Profile List to view and switch." \
                 '[[{"text":"📋 Profile List","callback_data":"menu:profiles"},{"text":"🔔 Process Notif","callback_data":"act:notifprocess"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
         fi
         return
@@ -892,14 +892,14 @@ Gunakan Profile List untuk melihat dan switch." \
     if [ "$code" = "0" ]; then
         tg_send_inline "✅ <b>Profile Downloaded</b>
 
-Gunakan Profile List untuk melihat dan switch." \
+Use Profile List to view and switch." \
             '[[{"text":"📋 Profile List","callback_data":"menu:profiles"},{"text":"🔔 Process Notif","callback_data":"act:notifprocess"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
     else
         [ -z "$msg" ] && msg="Unknown error"
-        tg_send_inline "❌ <b>Download Gagal</b>
+        tg_send_inline "❌ <b>Download Failed</b>
 
 Error: $msg" \
-            '[[{"text":"📥 Coba Lagi","callback_data":"menu:download"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
+            '[[{"text":"📥 Try Again","callback_data":"menu:download"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
     fi
 }
 
@@ -909,10 +909,10 @@ do_notif_process() {
     result=$(lpac_api notif-process)
     code=$(echo "$result" | jq -r '.payload.code // 99')
     if [ "$code" = "0" ]; then
-        tg_send_inline "✅ Notifikasi diproses." \
+        tg_send_inline "✅ Notifications processed." \
             '[[{"text":"📋 Profile List","callback_data":"menu:profiles"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
     else
-        tg_send_inline "❌ Gagal proses notifikasi." \
+        tg_send_inline "❌ Failed to process notifications." \
             '[[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
     fi
 }
@@ -976,7 +976,7 @@ do_simslot() {
         # Internet may drop — use retry
         tg_send_retry "✅ <b>SIM Slot Switched</b>
 
-Aktif: <b>$slot_name</b>" \
+Active: <b>$slot_name</b>" \
             "[[{\"text\":\"🔄 SIM Switch\",\"callback_data\":\"menu:simswitch\",\"style\":\"primary\"},{\"text\":\"📱 EID Info\",\"callback_data\":\"menu:eid\"}],[{\"text\":\"🏠 Menu\",\"callback_data\":\"menu:main\"}]]"
     elif [ "$actual_slot" = "?" ]; then
         # Could not verify (AT port may be temporarily unavailable during switch)
@@ -986,14 +986,14 @@ Aktif: <b>$slot_name</b>" \
         tg_send_retry "⚠️ <b>SIM Switch sent</b>
 
 Target: <b>$slot_name</b>
-Verifikasi tidak tersedia (modem reconnecting).
-Cek SIM Switch menu setelah modem online." \
+Verification unavailable \(modem reconnecting\).
+Check SIM Switch menu after modem is online." \
             "[[{\"text\":\"🔄 Cek Status\",\"callback_data\":\"menu:simswitch\",\"style\":\"primary\"},{\"text\":\"🏠 Menu\",\"callback_data\":\"menu:main\"}]]"
     else
-        tg_send_retry "❌ <b>SIM Switch Gagal</b>
+        tg_send_retry "❌ <b>SIM Switch Failed</b>
 
 Target: $slot_name
-Actual: <b>$actual_name</b> (tidak berubah)" \
+Actual: <b>$actual_name</b> (unchanged)" \
             "[[{\"text\":\"🔄 Retry\",\"callback_data\":\"menu:simswitch\"},{\"text\":\"🏠 Menu\",\"callback_data\":\"menu:main\"}]]"
     fi
 }
@@ -1034,8 +1034,8 @@ handle_callback() {
 
 ICCID: <code>$iccid</code>
 
-Kirim nama baru (max 64 karakter):" \
-                '[[{"text":"❌ Batal","callback_data":"cancel","style":"danger"}]]'
+Send new name \(max 64 characters\):" \
+                '[[{"text":"❌ Cancel","callback_data":"cancel","style":"danger"}]]'
             ;;
 
         # SIM Slot switch
@@ -1051,13 +1051,13 @@ Kirim nama baru (max 64 karakter):" \
                 [ "$slot" = "1" ] && slot_name="eSIM"
             }
             save_pending "simslot" "$slot"
-            tg_send_inline "⚠️ <b>Konfirmasi Switch SIM Slot</b>
+            tg_send_inline "⚠️ <b>Confirm SIM Slot Switch</b>
 
 Target: <b>$slot_name</b>
 
-⚠️ Internet akan terputus sementara.
-Lanjutkan?" \
-                '[[{"text":"✅ Ya, Switch","callback_data":"confirm:yes","style":"success"},{"text":"❌ Batal","callback_data":"cancel","style":"danger"}]]'
+⚠️ Internet will briefly disconnect.
+Continue?" \
+                '[[{"text":"✅ Yes, Switch","callback_data":"confirm:yes","style":"success"},{"text":"❌ Cancel","callback_data":"cancel","style":"danger"}]]'
             ;;
 
         # Profile switch (ask confirmation)
@@ -1065,18 +1065,18 @@ Lanjutkan?" \
             local iccid="${data#sw:}"
             tg_answer_cb "$cb_id" "Switch profile..."
             if [ "$ALLOW_DISRUPTIVE" != "1" ]; then
-                tg_send "⛔ Operasi disruptive dinonaktifkan."
+                tg_send "⛔ Disruptive operations disabled."
                 return
             fi
             if [ "$REQUIRE_CONFIRM" = "1" ]; then
                 save_pending "switch" "$iccid"
-                tg_send_inline "⚠️ <b>Konfirmasi Switch Profile</b>
+                tg_send_inline "⚠️ <b>Confirm Switch Profile</b>
 
 ICCID: <code>$iccid</code>
 
 Internet akan TERPUTUS 30-60 detik.
-Lanjutkan?" \
-                    '[[{"text":"✅ Ya, Switch","callback_data":"confirm:yes","style":"success"},{"text":"❌ Batal","callback_data":"cancel","style":"danger"}]]'
+Continue?" \
+                    '[[{"text":"✅ Yes, Switch","callback_data":"confirm:yes","style":"success"},{"text":"❌ Cancel","callback_data":"cancel","style":"danger"}]]'
             else
                 do_switch "$iccid"
             fi
@@ -1087,17 +1087,17 @@ Lanjutkan?" \
             local iccid="${data#del:}"
             tg_answer_cb "$cb_id" "Delete profile..."
             if [ "$ALLOW_DISRUPTIVE" != "1" ]; then
-                tg_send "⛔ Operasi disruptive dinonaktifkan."
+                tg_send "⛔ Disruptive operations disabled."
                 return
             fi
             save_pending "delete" "$iccid"
-            tg_send_inline "🗑 <b>Konfirmasi Hapus Profile</b>
+            tg_send_inline "🗑 <b>Confirm Delete Profile</b>
 
 ICCID: <code>$iccid</code>
 
-⚠️ Profile dihapus permanen!
-Lanjutkan?" \
-                '[[{"text":"🗑 Ya, Hapus","callback_data":"confirm:yes","style":"danger"},{"text":"❌ Batal","callback_data":"cancel"}]]'
+⚠️ Profile will be permanently deleted!
+Continue?" \
+                '[[{"text":"🗑 Yes, Delete","callback_data":"confirm:yes","style":"danger"},{"text":"❌ Cancel","callback_data":"cancel"}]]'
             ;;
 
         # Confirmation
@@ -1112,14 +1112,14 @@ Lanjutkan?" \
                 esac
                 clear_pending
             else
-                tg_send "⚠️ Tidak ada operasi pending."
+                tg_send "⚠️ No pending operation."
             fi
             ;;
 
         cancel)
-            tg_answer_cb "$cb_id" "Dibatalkan"
+            tg_answer_cb "$cb_id" "DiCancelkan"
             clear_pending
-            tg_send_inline "❌ Dibatalkan." \
+            tg_send_inline "❌ Cancelled." \
                 '[[{"text":"📋 Profile List","callback_data":"menu:profiles"},{"text":"🏠 Menu","callback_data":"menu:main"}]]'
             ;;
 
@@ -1168,7 +1168,7 @@ handle_message() {
             LPA:1\$*|lpa:1\$*)
                 save_pending "download" "$text"
                 tg_send_inline "📥 Download ini?" \
-                    '[[{"text":"✅ Ya","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"cancel"}]]'
+                    '[[{"text":"✅ Ya","callback_data":"confirm:yes"},{"text":"❌ Cancel","callback_data":"cancel"}]]'
                 ;;
             /cancel)
                 clear_pending
@@ -1189,10 +1189,10 @@ handle_message() {
             clear_pending; send_main_menu; return
         fi
         if [ ${#new_name} -gt 64 ]; then
-            tg_send "⚠️ Max 64 karakter. Coba lagi:"; return
+            tg_send "⚠️ Max 64 karakter. Try Again:"; return
         fi
         if [ ${#new_name} -lt 1 ]; then
-            tg_send "⚠️ Nama tidak boleh kosong."; return
+            tg_send "⚠️ Name cannot be empty."; return
         fi
         clear_pending
         tg_send "⏳"
@@ -1206,7 +1206,7 @@ handle_message() {
                 '[[{"text":"📋 Profiles","callback_data":"menu:profiles","style":"primary"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
         else
             local err=$(echo "$result" | jq -r '.payload.message // "Unknown"')
-            tg_send_inline "❌ Rename gagal: $err" \
+            tg_send_inline "❌ Rename failed: $err" \
                 '[[{"text":"✏️ Retry","callback_data":"menu:rename"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
         fi
         return
@@ -1221,41 +1221,47 @@ handle_message() {
         "🔔 Notifications")  send_notif_list ;;
         "📡 Modem Status")   send_modem_status ;;
         "⚙️ Settings")       send_settings ;;
-        "❓ Help")           tg_send "📋 <b>QModem eSIM Bot</b>
+        "❓ Help")           tg_send "📋 <b>QModem eSIM Bot v${APP_VER}</b>
 
 <b>Menu Buttons:</b>
-📱 Info EID — chip info, storage, EID
+📱 Info EID — eUICC chip info, storage, EID
 📋 Profile List — switch/manage eSIM profiles
 📥 Download — download new eSIM profile
 🔔 Notifications — process pending notifications
-📡 Modem Status — signal, operator, technology
+📡 Modem Status — signal, operator, band, temperature
 ⚙️ Settings — toggle backend/proxy/debug
 
 <b>Commands:</b>
-/eid — Info eUICC lengkap
-/profiles — Daftar profile + tombol switch
-/status — Status modem &amp; sinyal
-/download &lt;LPA&gt; — Download profile baru
-/enable &lt;ICCID&gt; — Switch ke profile lain
-/delete &lt;ICCID&gt; — Hapus profile (permanen)
-/notif — Proses notifikasi eSIM
-/settings — Pengaturan lpac
-/chatid — Tampilkan Chat ID kamu" ;;
+/eid — Full eUICC chip information
+/profiles — Profile list with switch buttons
+/status — Modem status &amp; signal details
+/download &lt;LPA&gt; — Download new profile
+/enable &lt;ICCID&gt; — Switch to another profile
+/delete &lt;ICCID&gt; — Delete profile (permanent)
+/notif — Process eSIM notifications
+/settings — lpac backend settings
+/chatid — Show your Chat ID
+
+<b>Manage (via buttons):</b>
+⚡ Manage Profile — delete/rename profiles
+🔄 SIM Switch — switch between SIM card and eSIM
+✏️ Rename — change profile nickname" ;;
         "🏠 Menu"|"Menu Utama"|"Menu") send_main_menu ;;
 
         # Slash commands
         /start|/menu)       send_main_menu ;;
         /help)              tg_send "📋 <b>Commands</b>
 
-/eid - Info eUICC
-/profiles - Daftar profile
-/status - Status modem
+/eid - eUICC chip info
+/profiles - Profile list with buttons
+/status - Modem status &amp; signal
 /download &lt;LPA&gt; - Download profile
 /enable &lt;ICCID&gt; - Switch profile
-/delete &lt;ICCID&gt; - Hapus profile
-/notif - Proses notifikasi
-/settings - Pengaturan
-/chatid - Tampilkan Chat ID" ;;
+/delete &lt;ICCID&gt; - Delete profile
+/notif - Process notifications
+/settings - Backend settings
+/chatid - Show Chat ID
+/cancel - Cancel current operation" ;;
         /chatid)            tg_send "Chat ID: <code>$chat</code>" ;;
         /eid|/info)         send_eid_info ;;
         /profiles|/profile) send_profile_list ;;
@@ -1268,7 +1274,7 @@ handle_message() {
             case "$arg" in LPA:1\$*|lpa:1\$*)
                 save_pending "download" "$arg"
                 tg_send_inline "📥 Download ini?" \
-                    '[[{"text":"✅ Ya","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"cancel"}]]'
+                    '[[{"text":"✅ Ya","callback_data":"confirm:yes"},{"text":"❌ Cancel","callback_data":"cancel"}]]'
                 ;; *)
                 tg_send "⚠️ Format: /download LPA:1\$server\$matchingId"
                 ;; esac
@@ -1281,7 +1287,7 @@ handle_message() {
             if [ "$REQUIRE_CONFIRM" = "1" ]; then
                 save_pending "switch" "$arg"
                 tg_send_inline "⚠️ Switch ke <code>$arg</code>?" \
-                    '[[{"text":"✅ Ya","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"cancel"}]]'
+                    '[[{"text":"✅ Ya","callback_data":"confirm:yes"},{"text":"❌ Cancel","callback_data":"cancel"}]]'
             else
                 do_switch "$arg"
             fi ;;
@@ -1290,8 +1296,8 @@ handle_message() {
             local arg="${text#/delete }"
             [ -z "$arg" ] && { tg_send "⚠️ Format: /delete &lt;ICCID&gt;"; return; }
             save_pending "delete" "$arg"
-            tg_send_inline "🗑 Hapus <code>$arg</code>?" \
-                '[[{"text":"🗑 Ya","callback_data":"confirm:yes"},{"text":"❌ Batal","callback_data":"cancel"}]]'
+            tg_send_inline "🗑 Delete <code>$arg</code>?" \
+                '[[{"text":"🗑 Ya","callback_data":"confirm:yes"},{"text":"❌ Cancel","callback_data":"cancel"}]]'
             ;;
         /delete)            tg_send "⚠️ Format: /delete &lt;ICCID&gt;" ;;
 
