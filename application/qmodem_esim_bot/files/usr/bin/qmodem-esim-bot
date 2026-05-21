@@ -444,7 +444,7 @@ send_sim_switch() {
                 # Foxconn T99W175: AT^SWITCH_SLOT? → ^SWITCH_SLOT: 0 or 1
                 sim_resp=$(sms_tool_q -d "$at_port" at "AT^SWITCH_SLOT?" 2>/dev/null)
                 if echo "$sim_resp" | grep -qi "SWITCH_SLOT"; then
-                    cur_slot=$(echo "$sim_resp" | grep -i "SWITCH_SLOT" | sed 's/.*: *//;s/\r//')
+                    cur_slot=$(echo "$sim_resp" | grep -i "SWITCH_SLOT" | grep -o '[0-9]' | head -1)
                 fi
                 ;;
             quectel)
@@ -470,6 +470,12 @@ send_sim_switch() {
     fi
 
     # For Foxconn: slot 0 = SIM card, slot 1 = eSIM
+    # Fallback to UCI if AT command didn't work
+    if [ "$cur_slot" = "?" ]; then
+        cur_slot=$(uci -q get "qmodem.${modem_sec}.sim_slot" 2>/dev/null)
+        [ -z "$cur_slot" ] && cur_slot="1"
+    fi
+
     local slot_label=""
     case "$manufacturer" in
         foxconn)
@@ -489,7 +495,10 @@ send_sim_switch() {
 Current: <b>$slot_label</b>
 Modem: <code>$modem_sec</code> ($manufacturer)
 
-⚠️ Switching SIM slot will restart modem connection."
+📌 <b>SIM Card</b> = Physical nano-SIM slot
+📌 <b>eSIM</b> = Embedded eUICC (removable 9eSIM)
+
+⚠️ Switching will briefly disconnect internet."
 
     # Build buttons based on manufacturer
     local kb=""
@@ -849,7 +858,26 @@ handle_message() {
         "🔔 Notifications")  send_notif_list ;;
         "📡 Modem Status")   send_modem_status ;;
         "⚙️ Settings")       send_settings ;;
-        "❓ Help")           tg_send "/eid /profiles /status /download /enable /delete /notif /settings" ;;
+        "❓ Help")           tg_send "📋 <b>QModem eSIM Bot</b>
+
+<b>Menu Buttons:</b>
+📱 Info EID — chip info, storage, EID
+📋 Profile List — switch/manage eSIM profiles
+📥 Download — download new eSIM profile
+🔔 Notifications — process pending notifications
+📡 Modem Status — signal, operator, technology
+⚙️ Settings — toggle backend/proxy/debug
+
+<b>Commands:</b>
+/eid — Info eUICC lengkap
+/profiles — Daftar profile + tombol switch
+/status — Status modem &amp; sinyal
+/download &lt;LPA&gt; — Download profile baru
+/enable &lt;ICCID&gt; — Switch ke profile lain
+/delete &lt;ICCID&gt; — Hapus profile (permanen)
+/notif — Proses notifikasi eSIM
+/settings — Pengaturan lpac
+/chatid — Tampilkan Chat ID kamu" ;;
         "🏠 Menu"|"Menu Utama"|"Menu") send_main_menu ;;
 
         # Slash commands
