@@ -599,6 +599,7 @@ send_manage_menu() {
         return
     fi
 
+    kb_rows="${kb_rows}[{\"text\":\"✏️ Rename Profile\",\"callback_data\":\"menu:rename\",\"style\":\"primary\"}],"
     kb_rows="${kb_rows}[{\"text\":\"📋 Profiles\",\"callback_data\":\"menu:profiles\"},{\"text\":\"🏠 Menu\",\"callback_data\":\"menu:main\"}]"
     tg_send_inline "🗑 <b>Delete Profile</b>" "[${kb_rows}]"
 }
@@ -705,6 +706,38 @@ Modem: <code>$modem_sec</code> ($manufacturer)
     esac
 
     tg_send_inline "$text" "$kb"
+}
+
+###############################################################################
+# UI: Rename Profile (select profile → enter new name)
+###############################################################################
+
+send_rename_menu() {
+    local raw
+    raw=$(lpac_api profiles)
+    local count
+    count=$(echo "$raw" | jq -r '.payload.data | length' 2>/dev/null)
+    [ -z "$count" ] || [ "$count" = "null" ] && count=0
+
+    if [ "$count" = "0" ]; then
+        tg_send_inline "✏️ No profiles." '[[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
+        return
+    fi
+
+    local kb_rows="" i=0
+
+    while [ $i -lt "$count" ]; do
+        local name iccid
+        name=$(echo "$raw" | jq -r ".payload.data[$i].profileNickname // .payload.data[$i].profileName // \"Profile $((i+1))\"")
+        iccid=$(echo "$raw" | jq -r ".payload.data[$i].iccid")
+        kb_rows="${kb_rows}[{\"text\":\"✏️ $name\",\"callback_data\":\"ren:$iccid\"}],"
+        i=$((i + 1))
+    done
+
+    kb_rows="${kb_rows}[{\"text\":\"📋 Profiles\",\"callback_data\":\"menu:profiles\"},{\"text\":\"🏠 Menu\",\"callback_data\":\"menu:main\"}]"
+    tg_send_inline "✏️ <b>Rename Profile</b>
+
+Pilih profile untuk rename:" "[${kb_rows}]"
 }
 
 ###############################################################################
@@ -980,6 +1013,7 @@ handle_callback() {
         menu:main)      tg_answer_cb "$cb_id" "Menu"; clear_pending; send_main_menu ;;
         menu:profiles)  tg_answer_cb "$cb_id" "Loading profiles..."; send_profile_list ;;
         menu:manage)    tg_answer_cb "$cb_id" "Manage profiles"; send_manage_menu ;;
+        menu:rename)    tg_answer_cb "$cb_id" "Rename"; send_rename_menu ;;
         menu:download)  tg_answer_cb "$cb_id" "Download"; send_download_prompt ;;
         menu:notif)     tg_answer_cb "$cb_id" "Notifications"; send_notif_list ;;
         menu:settings)  tg_answer_cb "$cb_id" "Settings"; send_settings ;;
@@ -990,6 +1024,19 @@ handle_callback() {
         act:status)     tg_answer_cb "$cb_id" "Refreshing..."; send_modem_status ;;
         act:notifprocess) tg_answer_cb "$cb_id" "Processing..."; do_notif_process ;;
         menu:eid)       tg_answer_cb "$cb_id" "EID Info"; send_eid_info ;;
+
+        # Rename profile (ask for new nickname)
+        ren:*)
+            local iccid="${data#ren:}"
+            tg_answer_cb "$cb_id" "Rename..."
+            save_pending "rename" "$iccid"
+            tg_send_inline "✏️ <b>Rename Profile</b>
+
+ICCID: <code>$iccid</code>
+
+Kirim nama baru (max 64 karakter):" \
+                '[[{"text":"❌ Batal","callback_data":"cancel","style":"danger"}]]'
+            ;;
 
         # SIM Slot switch
         simslot:*)
@@ -1131,6 +1178,37 @@ handle_message() {
                 tg_send "⚠️ Format: <code>LPA:1\$server\$matchingId</code>"
                 ;;
         esac
+        return
+    fi
+
+    # Check if we're waiting for rename input
+    if load_pending && [ "$PEND_ACTION" = "rename" ] && [ -n "$PEND_ARG" ]; then
+        local new_name="$text"
+        local iccid="$PEND_ARG"
+        if [ "$new_name" = "/cancel" ]; then
+            clear_pending; send_main_menu; return
+        fi
+        if [ ${#new_name} -gt 64 ]; then
+            tg_send "⚠️ Max 64 karakter. Coba lagi:"; return
+        fi
+        if [ ${#new_name} -lt 1 ]; then
+            tg_send "⚠️ Nama tidak boleh kosong."; return
+        fi
+        clear_pending
+        tg_send "⏳"
+        local result
+        result=$(lpac_api nickname "$iccid" --nickname "$new_name")
+        local rcode=$(echo "$result" | jq -r '.payload.code // 99')
+        if [ "$rcode" = "0" ]; then
+            tg_send_inline "✅ <b>Renamed</b>
+
+→ <b>$new_name</b>" \
+                '[[{"text":"📋 Profiles","callback_data":"menu:profiles","style":"primary"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
+        else
+            local err=$(echo "$result" | jq -r '.payload.message // "Unknown"')
+            tg_send_inline "❌ Rename gagal: $err" \
+                '[[{"text":"✏️ Retry","callback_data":"menu:rename"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
+        fi
         return
     fi
 
