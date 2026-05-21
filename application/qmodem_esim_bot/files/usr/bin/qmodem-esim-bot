@@ -441,10 +441,13 @@ send_sim_switch() {
         local sim_resp=""
         case "$manufacturer" in
             foxconn)
-                # Foxconn T99W175: AT^SWITCH_SLOT? → ^SWITCH_SLOT: 0 or 1
+                # Foxconn T99W175: AT^SWITCH_SLOT? → "SIM1 ENABLE" or "SIM2 ENABLE"
+                # SIM1 = physical SIM (slot 0), SIM2 = eSIM (slot 1)
                 sim_resp=$(sms_tool_q -d "$at_port" at "AT^SWITCH_SLOT?" 2>/dev/null)
-                if echo "$sim_resp" | grep -qi "SWITCH_SLOT"; then
-                    cur_slot=$(echo "$sim_resp" | grep -i "SWITCH_SLOT" | grep -o '[0-9]' | head -1)
+                if echo "$sim_resp" | grep -qi "SIM1"; then
+                    cur_slot="0"
+                elif echo "$sim_resp" | grep -qi "SIM2"; then
+                    cur_slot="1"
                 fi
                 ;;
             quectel)
