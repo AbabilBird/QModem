@@ -292,84 +292,110 @@ send_modem_status() {
         manufacturer=$(uci -q get "qmodem.${modem_sec}.manufacturer")
     }
 
-    # Gather info from multiple AT commands for rich status
-    local model="-" op="-" tech="-" sig_pct="-" sig_dbm="-" state="-"
-    local temp="-" fw="-" imei="-" imsi="-" iccid="-"
-    local rsrp="-" rsrq="-" sinr="-" band="-" cell_id="-"
+    if [ -z "$at_port" ] || [ ! -e "$at_port" ] || [ ! -x /usr/bin/sms_tool_q ]; then
+        tg_send_inline "❌ AT port not available." '[[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
+        return
+    fi
 
-    if [ -n "$at_port" ] && [ -e "$at_port" ] && [ -x /usr/bin/sms_tool_q ]; then
-        local resp=""
+    local resp="" model="-" fw="-" imei="-" op="-" tech="-" state="-"
+    local sig_pct="-" sig_dbm="-" temp="-"
+    local rsrp="-" rsrq="-" rssi="-" sinr="-"
+    local pband="-" pci="-" earfcn="-" ca_bands=""
 
-        # Model (ATI)
-        resp=$(sms_tool_q -d "$at_port" at "ATI" 2>/dev/null)
-        model=$(echo "$resp" | grep -i "model\|revision" | head -1 | sed 's/.*: *//')
-        [ -z "$model" ] && model=$(echo "$resp" | sed -n '2p' | tr -d '\r')
-        fw=$(echo "$resp" | grep -i "revision" | head -1 | sed 's/.*: *//' | tr -d '\r')
+    # Model & Firmware (AT+CGMI / AT+CGMM / AT+CGMR)
+    resp=$(sms_tool_q -d "$at_port" at "AT+CGMI" 2>/dev/null)
+    local mfr=$(echo "$resp" | grep -v "^AT\|^OK\|^$" | head -1 | tr -d '\r')
+    resp=$(sms_tool_q -d "$at_port" at "AT+CGMM" 2>/dev/null)
+    local mdl=$(echo "$resp" | grep -v "^AT\|^OK\|^$" | head -1 | tr -d '\r')
+    model="${mfr} ${mdl}"
+    resp=$(sms_tool_q -d "$at_port" at "AT+CGMR" 2>/dev/null)
+    fw=$(echo "$resp" | grep -v "^AT\|^OK\|^$" | head -1 | tr -d '\r')
 
-        # IMEI
-        resp=$(sms_tool_q -d "$at_port" at "AT+CGSN" 2>/dev/null)
-        imei=$(echo "$resp" | grep -o '[0-9]\{15\}' | head -1)
+    # IMEI
+    resp=$(sms_tool_q -d "$at_port" at "AT+CGSN" 2>/dev/null)
+    imei=$(echo "$resp" | grep -o '[0-9]\{15\}' | head -1)
 
-        # Operator (AT+COPS?)
-        resp=$(sms_tool_q -d "$at_port" at "AT+COPS?" 2>/dev/null)
-        if echo "$resp" | grep -q '+COPS:'; then
-            op=$(echo "$resp" | grep '+COPS:' | sed 's/.*"\(.*\)".*/\1/')
-            local act=$(echo "$resp" | grep '+COPS:' | grep -o ',[0-9]*$' | tr -d ',')
-            case "$act" in
-                0) tech="GSM" ;; 2) tech="UTRAN" ;; 3) tech="EDGE" ;;
-                4) tech="HSDPA" ;; 5) tech="HSUPA" ;; 6) tech="HSPA+" ;;
-                7) tech="LTE" ;; 12) tech="NR 5G" ;; 13) tech="LTE+NR" ;;
-            esac
-        fi
+    # Operator & Technology (AT+COPS?)
+    resp=$(sms_tool_q -d "$at_port" at "AT+COPS?" 2>/dev/null)
+    if echo "$resp" | grep -q '+COPS:'; then
+        op=$(echo "$resp" | grep '+COPS:' | sed 's/.*"\(.*\)".*/\1/')
+        local act=$(echo "$resp" | grep '+COPS:' | grep -o ',[0-9]*$' | tr -d ',')
+        case "$act" in
+            7) tech="LTE" ;; 12) tech="NR 5G" ;; 13) tech="5G NSA" ;;
+            0) tech="GSM" ;; 2) tech="UTRAN" ;; 6) tech="HSPA+" ;;
+        esac
+    fi
 
-        # Signal (AT+CSQ)
-        resp=$(sms_tool_q -d "$at_port" at "AT+CSQ" 2>/dev/null)
-        if echo "$resp" | grep -q '+CSQ:'; then
-            local csq=$(echo "$resp" | grep '+CSQ:' | sed 's/+CSQ: *\([0-9]*\).*/\1/')
-            if [ -n "$csq" ] && [ "$csq" != "99" ]; then
-                sig_dbm=$(( csq * 2 - 113 ))
-                sig_pct=$(( csq * 100 / 31 ))
-                [ "$sig_pct" -gt 100 ] && sig_pct=100
-            fi
-        fi
-
-        # Registration (AT+CEREG?)
-        resp=$(sms_tool_q -d "$at_port" at "AT+CEREG?" 2>/dev/null)
-        if echo "$resp" | grep -q '+CEREG:'; then
-            local reg=$(echo "$resp" | grep '+CEREG:' | sed 's/+CEREG: *[0-9]*,\([0-9]*\).*/\1/')
-            case "$reg" in
-                1) state="Registered (Home)" ;; 5) state="Registered (Roaming)" ;;
-                2) state="Searching..." ;; 3) state="Denied" ;; 0) state="Not registered" ;;
-            esac
-        fi
-
-        # Temperature (Foxconn specific or generic)
-        resp=$(sms_tool_q -d "$at_port" at "AT+QTEMP" 2>/dev/null)
-        if echo "$resp" | grep -qi "QTEMP\|temp"; then
-            temp=$(echo "$resp" | grep -o '[0-9]\+' | head -1)
-            [ -n "$temp" ] && temp="${temp}°C"
-        fi
-
-        # RSRP/RSRQ/SINR (AT+QENG or AT+CESQ)
-        resp=$(sms_tool_q -d "$at_port" at 'AT+CESQ' 2>/dev/null)
-        if echo "$resp" | grep -q '+CESQ:'; then
-            # +CESQ: rxlev,ber,rscp,ecno,rsrq,rsrp
-            local cesq_line=$(echo "$resp" | grep '+CESQ:' | sed 's/+CESQ: *//')
-            local f5=$(echo "$cesq_line" | cut -d, -f5)
-            local f6=$(echo "$cesq_line" | cut -d, -f6)
-            [ -n "$f6" ] && [ "$f6" != "255" ] && rsrp="$(( f6 - 141 )) dBm"
-            [ -n "$f5" ] && [ "$f5" != "255" ] && rsrq="$(( (f5 / 2) - 20 )) dB"
-        fi
-
-        # Band info (try AT+QNWINFO or AT+COPS for band)
-        resp=$(sms_tool_q -d "$at_port" at "AT+QNWINFO" 2>/dev/null)
-        if echo "$resp" | grep -qi "QNWINFO\|LTE\|NR"; then
-            band=$(echo "$resp" | grep -i "QNWINFO\|LTE\|NR" | grep -v "^AT" | head -1 | tr -d '\r' | sed 's/+QNWINFO: *//')
+    # Signal CSQ
+    resp=$(sms_tool_q -d "$at_port" at "AT+CSQ" 2>/dev/null)
+    if echo "$resp" | grep -q '+CSQ:'; then
+        local csq=$(echo "$resp" | grep '+CSQ:' | sed 's/+CSQ: *\([0-9]*\).*/\1/')
+        if [ -n "$csq" ] && [ "$csq" != "99" ]; then
+            sig_dbm=$(( csq * 2 - 113 ))
+            sig_pct=$(( csq * 100 / 31 ))
+            [ "$sig_pct" -gt 100 ] && sig_pct=100
         fi
     fi
 
-    # Build signal bar (Unicode block chars)
-    local sig_bar="▁▁▁▁▁"
+    # Registration (AT+CEREG?)
+    resp=$(sms_tool_q -d "$at_port" at "AT+CEREG?" 2>/dev/null)
+    if echo "$resp" | grep -q '+CEREG:'; then
+        local reg=$(echo "$resp" | grep '+CEREG:' | sed 's/+CEREG: *[0-9]*,\([0-9]*\).*/\1/')
+        case "$reg" in
+            1) state="Registered (Home)" ;; 5) state="Roaming" ;;
+            2) state="Searching" ;; 3) state="Denied" ;; 0) state="Not registered" ;;
+        esac
+    fi
+
+    # === Foxconn T99W175 specific: AT^TEMP? and AT^DEBUG? ===
+    # Temperature
+    resp=$(sms_tool_q -d "$at_port" at "AT^TEMP?" 2>/dev/null)
+    if echo "$resp" | grep -qi "TSENS\|PA\|Skin"; then
+        local t1=$(echo "$resp" | awk '/TSENS/ {gsub("C","",$2); print $2}')
+        local t2=$(echo "$resp" | awk '/PA/ {gsub("C","",$2); print $2}')
+        [ -n "$t1" ] && temp="${t1}°C"
+        [ -n "$t2" ] && [ -n "$t1" ] && [ "$t2" -gt "$t1" ] 2>/dev/null && temp="${t2}°C"
+    fi
+
+    # Cell/Signal detail (AT^DEBUG? — Foxconn proprietary)
+    resp=$(sms_tool_q -d "$at_port" at "AT^DEBUG?" 2>/dev/null)
+    if echo "$resp" | grep -qi "pcell\|lte_rsrp"; then
+        # Detect CA / 5G
+        echo "$resp" | grep -q "scell:" && tech="LTE-A"
+        echo "$resp" | grep -q "nr_band:" && tech="5G NSA"
+
+        # Primary cell
+        local pb=$(echo "$resp" | awk -F: '/^pcell:/ {print $3}' | cut -f1 -d" ")
+        local bw=$(echo "$resp" | awk -F: '/^pcell:/ {print $4}' | tr -d ' \r')
+        [ -n "$pb" ] && pband="B${pb} @${bw}"
+
+        pci=$(echo "$resp" | grep "pci:" | head -1 | awk -F: '{print $3}' | tr -d ' \r')
+        earfcn=$(echo "$resp" | grep "^channel:" | head -1 | awk -F: '{print $2}' | cut -f1 -d" " | tr -d ' \r')
+
+        # Signal metrics
+        local v=""
+        v=$(echo "$resp" | awk -F[:,] '/^lte_rsrp:/ {print $2}' | tr -d ' \r')
+        [ -n "$v" ] && rsrp="$v"
+        v=$(echo "$resp" | awk -F[:,] '/rsrq:/ {print $4}' | tr -d ' \r')
+        [ -n "$v" ] && rsrq="$v"
+        v=$(echo "$resp" | awk -F[:,] '/^lte_rssi:/ {print $2}' | tr -d ' \r')
+        [ -n "$v" ] && rssi="$v"
+        v=$(echo "$resp" | awk -F[:,] '/lte_snr:/ {print $4}' | tr -d ' \r')
+        [ -n "$v" ] && [ "$v" != "NA" ] && sinr="$v"
+
+        # CA bands
+        local scells=$(echo "$resp" | grep "^scell:" | awk -F: '{printf "B%s ", $3}' | sed 's/ *$//' | tr ' ' '+')
+        [ -n "$scells" ] && ca_bands="$scells"
+
+        # NR band (5G NSA)
+        local nr_b=$(echo "$resp" | awk -F: '/^nr_band:/ {print $2}' | tr -d ' \r')
+        [ -n "$nr_b" ] && {
+            [ -n "$ca_bands" ] && ca_bands="${ca_bands}+n${nr_b}" || ca_bands="n${nr_b}"
+        }
+    fi
+
+    # Signal bar
+    local sig_bar="░░░░░"
     if [ "$sig_pct" != "-" ]; then
         local p=$sig_pct
         if [ "$p" -ge 80 ]; then sig_bar="▁▃▅▇█"
@@ -380,29 +406,41 @@ send_modem_status() {
         fi
     fi
 
-    # Format output
+    # Build message
     local text="📡 <b>Modem Status</b>
 
-<b>Signal:</b> $sig_bar $sig_pct% ($sig_dbm dBm)
+<b>Signal:</b> $sig_bar ${sig_pct}% (${sig_dbm} dBm)
 <b>Operator:</b> $op
 <b>Technology:</b> $tech
 <b>State:</b> $state"
 
-    # Add detailed info if available
-    [ "$rsrp" != "-" ] && text="$text
-<b>RSRP:</b> $rsrp"
-    [ "$rsrq" != "-" ] && text="$text | <b>RSRQ:</b> $rsrq"
-    [ "$band" != "-" ] && [ -n "$band" ] && text="$text
-<b>Band:</b> <code>$band</code>"
+    [ "$pband" != "-" ] && text="${text}
+<b>Band:</b> $pband"
+    [ -n "$ca_bands" ] && text="${text} + $ca_bands"
+    [ "$pci" != "-" ] && [ -n "$pci" ] && text="${text}
+<b>PCI:</b> $pci | <b>EARFCN:</b> $earfcn"
 
-    text="$text
+    # Signal detail section
+    if [ "$rsrp" != "-" ] || [ "$rssi" != "-" ]; then
+        text="${text}
 
-<b>Model:</b> <code>$model</code>"
-    [ "$fw" != "-" ] && [ -n "$fw" ] && text="$text
-<b>Firmware:</b> <code>$fw</code>"
-    [ "$temp" != "-" ] && text="$text
-<b>Temp:</b> $temp"
-    [ -n "$imei" ] && text="$text
+📶 <b>Signal Detail:</b>"
+        [ "$rsrp" != "-" ] && text="${text}
+  RSRP: <code>$rsrp</code>"
+        [ "$rsrq" != "-" ] && text="${text} | RSRQ: <code>$rsrq</code>"
+        [ "$rssi" != "-" ] && text="${text}
+  RSSI: <code>$rssi</code>"
+        [ "$sinr" != "-" ] && text="${text} | SINR: <code>$sinr</code>"
+    fi
+
+    # Modem info section
+    text="${text}
+
+📋 <b>Modem:</b> <code>$model</code>"
+    [ "$fw" != "-" ] && [ -n "$fw" ] && text="${text}
+<b>FW:</b> <code>$fw</code>"
+    [ "$temp" != "-" ] && text="${text} | <b>Temp:</b> $temp"
+    [ -n "$imei" ] && text="${text}
 <b>IMEI:</b> <code>$imei</code>"
 
     tg_send_inline "$text" \
