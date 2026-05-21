@@ -989,8 +989,49 @@ mbim_dial(){
         apn="auto"
     fi
 
-    # mbim-proxy coexistence (used for lpac/eSIM):
+    # ─── MBIM Device Readiness Probe ───────────────────────────────────
+    # T99W175 (and similar Foxconn/Qualcomm modems) need 20-40 seconds
+    # after USB enumeration for the MBIM firmware to fully initialize.
+    # ModemManager handles this with port probing delays and retries.
+    # Without this check, quectel-CM-M connects to mbim-proxy but the
+    # proxy cannot open /dev/cdc-wdm* → 15s timeout → exit → infinite
+    # retry loop that never succeeds.
     #
+    # Solution: probe the MBIM device with mbimcli before dialing.
+    # If it fails, wait and retry (max 60s). This mirrors ModemManager's
+    # initialization sequence.
+    # ───────────────────────────────────────────────────────────────────
+    local mbim_dev="/dev/cdc-wdm0"
+    # Find actual cdc-wdm device from modem path
+    if [ -n "$modem_path" ] && [ -d "$modem_path" ]; then
+        local found_wdm
+        found_wdm=$(find "$modem_path" -name "cdc-wdm*" 2>/dev/null | head -1)
+        [ -n "$found_wdm" ] && mbim_dev="/dev/$(basename "$found_wdm")"
+    fi
+
+    if [ -e "$mbim_dev" ] && command -v mbimcli >/dev/null 2>&1; then
+        local probe_ok=0
+        local probe_try=0
+        local probe_max=12  # 12 tries × 5s = 60s max wait
+
+        while [ $probe_try -lt $probe_max ]; do
+            # Quick probe: try to open device and query caps (timeout 5s)
+            if mbimcli -d "$mbim_dev" -p --query-device-caps --no-close >/dev/null 2>&1; then
+                probe_ok=1
+                [ $probe_try -gt 0 ] && m_debug "MBIM device ready after $((probe_try * 5))s"
+                break
+            fi
+            probe_try=$((probe_try + 1))
+            [ $probe_try -eq 1 ] && m_debug "MBIM device not ready yet, waiting (T99W175 needs 20-40s after boot)..."
+            sleep 5
+        done
+
+        if [ $probe_ok -eq 0 ]; then
+            m_debug "WARNING: MBIM device not responding after 60s, attempting dial anyway"
+        fi
+    fi
+
+    # ─── mbim-proxy coexistence (used for lpac/eSIM) ──────────────────
     # The mbim-proxy daemon is managed by its own procd service
     # (/etc/init.d/mbim-proxy, START=70) so it is already up before
     # qmodem_network (START=99) reaches this point. Procd handles
