@@ -159,6 +159,33 @@ get_modem_section() {
     uci show qmodem 2>/dev/null | grep "=modem-device" | head -1 | cut -d. -f2 | cut -d= -f1
 }
 
+# Send message with retry (for after internet-disrupting operations)
+# Keeps trying every 5s for up to 90s until Telegram API responds
+tg_send_retry() {
+    local text="$1" kb_json="$2"
+    local attempt=0 max_attempts=18  # 18 × 5s = 90s
+    while [ $attempt -lt $max_attempts ]; do
+        local payload
+        if [ -n "$kb_json" ]; then
+            payload=$(jq -nc --arg c "$CHAT_ID" --arg t "$text" --argjson kb "$kb_json" \
+                '{chat_id:$c, text:$t, parse_mode:"HTML", reply_markup:{inline_keyboard:$kb}}')
+        else
+            payload=$(jq -nc --arg c "$CHAT_ID" --arg t "$text" \
+                '{chat_id:$c, text:$t, parse_mode:"HTML"}')
+        fi
+        local resp
+        resp=$(tg_post "sendMessage" "$payload")
+        if echo "$resp" | grep -q '"ok":true'; then
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 5
+    done
+    # Final attempt logged
+    log_msg "tg_send_retry failed after ${max_attempts} attempts"
+    return 1
+}
+
 ###############################################################################
 # UI: Main Menu (persistent keyboard buttons)
 ###############################################################################
@@ -709,8 +736,7 @@ poll_lock_result() {
 
 do_switch() {
     local iccid="$1"
-    tg_send "⏳ <b>Switching profile...</b>
-Mohon tunggu 30-60 detik..."
+    tg_send "⏳"
     local section result status
     section=$(get_modem_section)
     if [ -n "$section" ]; then
@@ -720,15 +746,16 @@ Mohon tunggu 30-60 detik..."
     fi
     status=$(echo "$result" | jq -r '.result.status // "0"')
     if [ "$status" = "1" ]; then
-        tg_send_inline "✅ <b>Profile Switched</b>
+        # Internet was down during switch — retry sending result
+        tg_send_retry "✅ <b>Profile Switched</b>
 
 ICCID: <code>$iccid</code>
-Internet dipulihkan." \
+Internet reconnected." \
             '[[{"text":"📋 Profile List","callback_data":"menu:profiles"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
     else
         local err
         err=$(echo "$result" | jq -r '.result.error // "Unknown"')
-        tg_send_inline "❌ <b>Switch Gagal</b>
+        tg_send_retry "❌ <b>Switch Gagal</b>
 
 Error: $err" \
             '[[{"text":"📋 Profile List","callback_data":"menu:profiles"}],[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
@@ -862,14 +889,13 @@ do_notif_process() {
 
 do_simslot() {
     local slot="$1"
-    tg_send "⏳ Switching SIM slot..."
+    tg_send "⏳"
     local modem_sec=$(get_modem_section)
     local at_port=$(uci -q get "qmodem.${modem_sec}.at_port")
     local manufacturer=$(uci -q get "qmodem.${modem_sec}.manufacturer")
 
     if [ -z "$at_port" ] || [ ! -e "$at_port" ] || [ ! -x /usr/bin/sms_tool_q ]; then
-        tg_send_inline "❌ AT port not available." \
-            '[[{"text":"🏠 Menu","callback_data":"menu:main"}]]'
+        tg_send "❌ AT port not available."
         return
     fi
 
@@ -892,16 +918,17 @@ do_simslot() {
     if echo "$resp" | grep -qi "OK"; then
         uci -q set "qmodem.${modem_sec}.sim_slot=$slot"
         uci -q commit qmodem
-        tg_send_inline "✅ <b>SIM Slot Switched</b>
+        # Internet may drop — use retry to send result after reconnect
+        tg_send_retry "✅ <b>SIM Slot Switched</b>
 
 Aktif: <b>$slot_name</b>
-Modem akan reconnect dalam beberapa detik." \
+Modem reconnected." \
             "[[{\"text\":\"🔄 SIM Switch\",\"callback_data\":\"menu:simswitch\",\"style\":\"primary\"},{\"text\":\"📱 EID Info\",\"callback_data\":\"menu:eid\"}],[{\"text\":\"🏠 Menu\",\"callback_data\":\"menu:main\"}]]"
     else
-        tg_send_inline "❌ <b>SIM Switch Gagal</b>
+        tg_send_retry "❌ <b>SIM Switch Gagal</b>
 
 Command: <code>$at_cmd</code>
-Modem mungkin tidak support atau slot tidak tersedia." \
+Modem tidak support atau slot tidak tersedia." \
             "[[{\"text\":\"🔄 Retry\",\"callback_data\":\"menu:simswitch\"},{\"text\":\"🏠 Menu\",\"callback_data\":\"menu:main\"}]]"
     fi
 }
