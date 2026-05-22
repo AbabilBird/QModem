@@ -634,6 +634,15 @@ set_if()
                     proto="static"
                     protov6="dhcpv6"
                     ;;
+                "intel")
+                    # Intel XMM NCM: modem provides IP via AT+CGCONTRDP after
+                    # AT+CGDATA connects. Use DHCP as the NCM interface exposes
+                    # a DHCP server when data channel is active.
+                    # If DHCP doesn't work on specific firmware, switch to "static"
+                    # and use ip_change_intel() to set IP from AT+CGCONTRDP.
+                    proto="dhcp"
+                    protov6="dhcpv6"
+                    ;;
                 esac
             ;;
     esac
@@ -919,6 +928,11 @@ ecm_hang()
                 "mediatek")
                     at_command="AT+CGACT=0,$pdp_index"
                     ;;
+                "intel")
+                    # Intel XMM: close data channel and deactivate PDP
+                    at "${at_port}" "AT+XDATACHANNEL=0"
+                    at_command="AT+CGACT=0,0"
+                    ;;
                 *)
                     at_command="AT+GTRNDIS=0,$pdp_index"
                     ;;
@@ -1175,6 +1189,55 @@ at_dial()
                     at_command="AT+CGACT=1,$pdp_index"
                     cgdcont_command="AT+CGDCONT=$pdp_index,\"$pdp_type\",\"$apn\""
                     ;;
+                "intel")
+                    # Intel XMM L850-GL / L860-GL NCM dial sequence
+                    # Reference: mrhaav/openwrt atc-fib-l8x0_gl
+                    #
+                    # The Intel XMM modem requires explicit data channel binding
+                    # before data can flow through the NCM interface.
+                    # Sequence:
+                    #   1. AT+CGDCONT=0,"<pdp>","<apn>" - Set PDP context on CID 0
+                    #   2. AT+XGAUTH=0,<auth>,"<user>","<pass>" - Set authentication
+                    #   3. AT+XDNS=0,1;+XDNS=0,2 - Enable dynamic DNS (IPv4+IPv6)
+                    #   4. AT+CGPIAF=1,1,0,1 - Set IPv6 address format
+                    #   5. AT+XDATACHANNEL=1,1,"/USBCDC/0","/USBHS/NCM/0",2,0 - Bind data channel
+                    #   6. AT+CGDATA="M-RAW_IP",0 - Activate data session
+                    #
+                    # The modem uses CID 0 (not 1) for the default bearer.
+                    # AT+XDATACHANNEL maps the AT port (/USBCDC/0) to the NCM
+                    # data interface (/USBHS/NCM/0).
+                    # After AT+CGDATA succeeds, the NCM interface receives IP via
+                    # the modem's internal DHCP-like mechanism.
+                    #
+                    # On network-initiated disconnects (+CGEV: NW PDN DEACT 0),
+                    # the full sequence must be re-executed.
+                    # On IP change, AT+CGCONTRDP=0 retrieves the new IP.
+
+                    local intel_pdp_index=0
+                    cgdcont_command="AT+CGDCONT=${intel_pdp_index},\"$pdp_type\",\"$apn\""
+
+                    # Authentication setup
+                    if [ -n "$auth" ] && [ "$auth" != "none" ]; then
+                        case $auth in
+                            "pap") auth_num=1 ;;
+                            "chap") auth_num=2 ;;
+                            "auto"|"both"|"MsChapV2") auth_num=3 ;;
+                            *) auth_num=0 ;;
+                        esac
+                        [ -n "$username" ] || username=""
+                        [ -n "$password" ] || password=""
+                        ppp_auth_command="AT+XGAUTH=${intel_pdp_index},${auth_num},\"$username\",\"$password\""
+                    else
+                        ppp_auth_command="AT+XGAUTH=${intel_pdp_index},0,\"\",\"\""
+                    fi
+
+                    # DNS + IPv6 format + Data channel binding + Activate
+                    # These are sent as additional commands after cgdcont and auth
+                    intel_dns_command="AT+XDNS=${intel_pdp_index},1;+XDNS=${intel_pdp_index},2"
+                    intel_ipv6_format="AT+CGPIAF=1,1,0,1"
+                    intel_datachannel='AT+XDATACHANNEL=1,1,"/USBCDC/0","/USBHS/NCM/0",2,0'
+                    at_command="AT+CGDATA=\"M-RAW_IP\",${intel_pdp_index}"
+                    ;;
                 "lte")
                     at_command="AT+GTRNDIS=1,$pdp_index"
                     cgdcont_command="AT+CGDCONT=$pdp_index,\"$pdp_type\""$apn_append
@@ -1305,6 +1368,10 @@ at_dial()
   			at "${at_port}" "${cgdcont_command}"
             [ -n "$ppp_auth_command" ] && at "${at_port}" "$ppp_auth_command"
             [ -n "$nat_cfg" ] && at "${at_port}" "$nat_cfg"
+            # Intel XMM L850/L860-GL requires additional setup before data activation
+            [ -n "$intel_dns_command" ] && at "${at_port}" "$intel_dns_command"
+            [ -n "$intel_ipv6_format" ] && at "${at_port}" "$intel_ipv6_format"
+            [ -n "$intel_datachannel" ] && at "${at_port}" "$intel_datachannel"
         	at "${at_port}" "$at_command"
 		 	;;
 	esac
@@ -1434,6 +1501,66 @@ ip_change_fm350()
 
 }
 
+# Intel XMM L850/L860-GL IP change handler
+# When the operator changes the IP (typically every 2 hours on some networks),
+# the modem sends +CGEV: NW PDN DEACT 0 followed by +CGEV: ME PDN ACT 0.
+# The at_dial_monitor loop detects this as connection_status=0 (no IP from AT+CGPADDR)
+# and calls at_dial() again, which re-executes the full Intel NCM sequence.
+#
+# This function handles the case where IP changes WITHOUT full disconnect:
+# AT+CGCONTRDP=0 retrieves the new IP assignment from the modem.
+# We then update the OpenWrt interface with the new static IP config.
+ip_change_intel()
+{
+    m_debug "ip_change_intel: retrieving new IP from modem"
+    local public_dns1_ipv4="8.8.8.8"
+    local public_dns2_ipv4="8.8.4.4"
+
+    # Query current PDP context parameters
+    local response=$(at "${at_port}" "AT+CGCONTRDP=0")
+    local cgcontrdp=$(echo "$response" | grep "+CGCONTRDP:")
+
+    if [ -z "$cgcontrdp" ]; then
+        m_debug "ip_change_intel: AT+CGCONTRDP=0 returned empty, connection may be lost"
+        return
+    fi
+
+    # Parse IPv4 address (field 4), DNS1 (field 6), DNS2 (field 7)
+    # Format: +CGCONTRDP: 0,0,"apn",<ip>,<subnet>,<gw>,<dns1>,<dns2>
+    local ipv4_raw=$(echo "$cgcontrdp" | awk -F',' '{print $4}' | tr -d '"' | tr -d ' ')
+    # Extract just the IP part (before any subnet mask)
+    local ipv4_config=$(echo "$ipv4_raw" | awk -F'.' '{print $1"."$2"."$3"."$4}')
+    local ipv4_dns1=$(echo "$cgcontrdp" | awk -F',' '{print $6}' | tr -d '"' | tr -d ' ')
+    local ipv4_dns2=$(echo "$cgcontrdp" | awk -F',' '{print $7}' | tr -d '"' | tr -d ' ' | tr -d '\r')
+
+    if [ -z "$ipv4_config" ]; then
+        m_debug "ip_change_intel: could not parse IP from CGCONTRDP"
+        return
+    fi
+
+    # Calculate gateway (typically .1 of the same subnet for point-to-point)
+    local gateway="${ipv4_config%.*}.1"
+    local netmask="255.255.255.252"
+
+    [ -z "$ipv4_dns1" ] && ipv4_dns1="$public_dns1_ipv4"
+    [ -z "$ipv4_dns2" ] && ipv4_dns2="$public_dns2_ipv4"
+
+    m_debug "ip_change_intel: new IP=$ipv4_config gw=$gateway dns=$ipv4_dns1,$ipv4_dns2"
+
+    uci set network.${interface_name}.proto='static'
+    uci set network.${interface_name}.ipaddr="${ipv4_config}"
+    uci set network.${interface_name}.netmask="${netmask}"
+    uci set network.${interface_name}.gateway="${gateway}"
+    uci set network.${interface_name}.peerdns='0'
+    uci -q del network.${interface_name}.dns
+    uci add_list network.${interface_name}.dns="${ipv4_dns1}"
+    uci add_list network.${interface_name}.dns="${ipv4_dns2}"
+    uci commit network
+    ifdown ${interface_name}
+    ifup ${interface_name}
+    m_debug "ip_change_intel: interface $interface_name updated to $ipv4_config"
+}
+
 handle_5gethernet()
 {
     case $manufacturer in
@@ -1522,6 +1649,9 @@ handle_ip_change()
             case $platform in
                 "mediatek")
                     ip_change_fm350
+                    ;;
+                "intel")
+                    ip_change_intel
                     ;;
             esac
             ;;

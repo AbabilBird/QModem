@@ -105,6 +105,16 @@
                     "1.4",
                     "1.5"
                 ]
+            },
+            "8087:095a": {
+                "name": "l850-gl",
+                "mode": "ncm",
+                "option_driver": 1
+            },
+            "2cb7:0007": {
+                "name": "l850-gl",
+                "mode": "mbim",
+                "option_driver": 1
             }
         }
     }

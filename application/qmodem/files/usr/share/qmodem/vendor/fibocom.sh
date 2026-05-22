@@ -7,7 +7,10 @@ _Maintainer="Fujr <fjrcn@outlook.com>"
 source /usr/share/qmodem/generic.sh
 
 vendor_get_disabled_features(){
-    json_add_string "" ""
+    if [ "$platform" = "intel" ]; then
+        json_add_string "" "IMEI"
+        json_add_string "" "NeighborCell"
+    fi
 }
 
 debug_subject="fibocom_ctrl"
@@ -69,6 +72,13 @@ get_mode()
                     mode="mbim" ;;
             esac
         ;;
+        "intel")
+            case "$mode_num" in
+                "0") mode="ncm" ;;
+                "7") mode="mbim" ;;
+                *) mode="$mode_num" ;;
+            esac
+        ;;
         *)
             mode="$mode_num"
         ;;
@@ -127,6 +137,13 @@ set_mode()
                     *) mode_num="32" ;;
                 esac
             ;;
+        "intel")
+            case "$mode_config" in
+                "ncm") mode_num="0" ;;
+                "mbim") mode_num="7" ;;
+                *) mode_num="0" ;;
+            esac
+        ;;
         *)
             mode_num="32"
         ;;
@@ -135,6 +152,10 @@ set_mode()
     #设置模组
     at_command="AT+GTUSBMODE=${mode_num}"
     res=$(at "${at_port}" "${at_command}")
+    # Intel platform uses AT+CFUN=15 for restart after mode change
+    if [ "$platform" = "intel" ] && echo "$res" | grep -q "OK"; then
+        at "${at_port}" "AT+CFUN=15"
+    fi
     json_select "result"
     json_add_string "set_mode" "$res"
     json_add_string "mode" "$mode_config"
@@ -319,6 +340,73 @@ set_network_prefer_lte()
     json_close_object
 }
 
+#获取网络偏好 (Intel XMM平台, 使用AT+XACT)
+get_network_prefer_intel()
+{
+    at_command="AT+XACT?"
+    local response=$(at $at_port $at_command | grep "+XACT:" | sed 's/+XACT: //g' | sed 's/\r//g')
+    local network_prefer_num=$(echo $response | awk -F',' '{print $1}')
+
+    local network_prefer_3g="0";
+    local network_prefer_4g="0";
+
+    # AT+XACT: 1=WCDMA only, 2=LTE only, 4=WCDMA+LTE
+    case "$network_prefer_num" in
+        "1") network_prefer_3g="1" ;;
+        "2") network_prefer_4g="1" ;;
+        "4")
+            network_prefer_3g="1"
+            network_prefer_4g="1"
+        ;;
+        *)
+            network_prefer_3g="1"
+            network_prefer_4g="1"
+        ;;
+    esac
+
+    json_add_object network_prefer
+    json_add_string 3G $network_prefer_3g
+    json_add_string 4G $network_prefer_4g
+    json_close_array
+}
+
+#设置网络偏好 (Intel XMM平台, 使用AT+XACT)
+# AT+XACT=<rat>,,,<band_list>
+# rat: 1=WCDMA, 2=LTE, 4=WCDMA+LTE
+# band_list: 0=all, or specific bands (101=B1, 103=B3, 108=B8, etc.)
+set_network_prefer_intel()
+{
+    network_prefer_3g=$(echo $1 |jq -r 'contains(["3G"])')
+    network_prefer_4g=$(echo $1 |jq -r 'contains(["4G"])')
+    count=$(echo $1 |jq -r 'length')
+
+    local xact_rat
+    case "$count" in
+        "1")
+            if [ "$network_prefer_3g" = "true" ]; then
+                xact_rat="1"
+            elif [ "$network_prefer_4g" = "true" ]; then
+                xact_rat="2"
+            fi
+        ;;
+        "2")
+            if [ "$network_prefer_3g" = "true" ] && [ "$network_prefer_4g" = "true" ]; then
+                xact_rat="4"
+            fi
+        ;;
+        *) xact_rat="4" ;;
+    esac
+
+    # AT+XACT=<rat>,,,0 (0 = all bands for that RAT)
+    at_command="AT+XACT=${xact_rat},,,0"
+    res=$(at $at_port "$at_command")
+    json_select_object "result"
+    json_add_string "status" "$res"
+    json_add_string raw "$1"
+    json_add_string "xact_rat" "$xact_rat"
+    json_close_object
+}
+
 get_network_prefer()
 {
     case $platform in
@@ -333,6 +421,9 @@ get_network_prefer()
             ;;
         "lte")
             get_network_prefer_lte
+            ;;
+        "intel")
+            get_network_prefer_intel
             ;;
         *)
             get_network_prefer_nr
@@ -354,6 +445,9 @@ set_network_prefer()
             ;;
         "lte")
             set_network_prefer_lte $1
+            ;;
+        "intel")
+            set_network_prefer_intel $1
             ;;
         *)
             set_network_prefer_nr $1
@@ -593,6 +687,47 @@ network_info()
             add_speed_entry rx $rx_rate
             add_speed_entry tx $tx_rate
         ;;
+        "intel")
+            #Intel XMM specific signal info
+            at_command="AT+XCESQ?"
+            response=$(at $at_port $at_command | grep "+XCESQ:" | sed 's/+XCESQ: //g' | sed 's/\r//g')
+            if [ -n "$response" ]; then
+                local rsrp=$(echo $response | awk -F',' '{print $1}')
+                local rsrq=$(echo $response | awk -F',' '{print $2}')
+                local sinr=$(echo $response | awk -F',' '{print $3}')
+                [ -n "$rsrp" ] && add_plain_info_entry "RSRP" "${rsrp} dBm" "Reference Signal Received Power"
+                [ -n "$rsrq" ] && add_plain_info_entry "RSRQ" "${rsrq} dB" "Reference Signal Received Quality"
+                [ -n "$sinr" ] && add_plain_info_entry "SINR" "${sinr} dB" "Signal to Interference plus Noise Ratio"
+            else
+                #Fallback to AT+CSQ for basic signal
+                at_command="AT+CSQ"
+                response=$(at $at_port $at_command | grep "+CSQ:" | sed 's/+CSQ: //g' | sed 's/\r//g')
+                if [ -n "$response" ]; then
+                    local csq=$(echo $response | awk -F',' '{print $1}')
+                    if [ -n "$csq" ] && [ "$csq" != "99" ]; then
+                        local rssi=$((csq * 2 - 113))
+                        add_plain_info_entry "RSSI" "${rssi} dBm" "Received Signal Strength Indication"
+                    fi
+                fi
+            fi
+
+            #Current band
+            at_command="AT+XCCINFO?"
+            response=$(at $at_port $at_command | grep "+XCCINFO:" | sed 's/+XCCINFO: //g' | sed 's/\r//g')
+            if [ -n "$response" ]; then
+                local band=$(echo $response | awk -F',' '{print $4}')
+                [ -n "$band" ] && add_plain_info_entry "Band" "B${band}" "Current Band"
+            fi
+
+            #Carrier Aggregation
+            at_command="AT+XLEC?"
+            response=$(at $at_port $at_command | grep "+XLEC:" | sed 's/+XLEC: //g' | sed 's/\r//g')
+            if [ -z "$response" ]; then
+                at_command="AT+GTCAINFO?"
+                response=$(at $at_port $at_command | grep "+GTCAINFO:" | sed 's/+GTCAINFO: //g' | sed 's/\r//g')
+            fi
+            [ -n "$response" ] && add_plain_info_entry "CA Info" "$response" "Carrier Aggregation"
+        ;;
     esac
 }
 
@@ -610,6 +745,9 @@ get_lockband(){
             ;;
         "lte")
             get_lockband_lte
+            ;;
+        "intel")
+            get_lockband_intel
             ;;
         *)
             get_lockband_nr
@@ -825,6 +963,9 @@ set_lockband()
         "lte")
             set_lockband_lte
             ;;
+        "intel")
+            set_lockband_intel
+            ;;
         *)
             set_lockband_nr
             ;;
@@ -835,6 +976,101 @@ set_lockband()
     json_add_string "band_class" "$band_class"
     json_add_string "lock_band" "$lock_band"
     json_close_object
+}
+
+#锁频信息 (Intel XMM平台, 使用AT+XACT)
+# AT+XACT=<rat>,,,<band_list>
+# Band numbering: LTE bands = 100 + band_number (B1=101, B3=103, B8=108, B40=140)
+# WCDMA bands = band_number directly (0=all)
+get_lockband_intel()
+{
+    m_debug "Fibocom get lockband info intel (AT+XACT)"
+    get_lockband_config_command="AT+XACT?"
+    get_lockband_config_res=$(at $at_port $get_lockband_config_command | grep "+XACT:" | sed 's/+XACT: //g' | sed 's/\r//g')
+
+    json_add_object "UMTS"
+    json_add_array "available_band"
+    # WCDMA bands for L850-GL: 1, 2, 4, 5, 8
+    for band in 1 2 4 5 8; do
+        add_avalible_band_entry "$band" "UMTS_$band"
+    done
+    json_close_array
+    json_add_array "lock_band"
+    json_close_array
+    json_close_object
+
+    json_add_object "LTE"
+    json_add_array "available_band"
+    # LTE bands for L850-GL (using 100+band format): 1,2,3,4,5,7,8,12,13,17,18,19,20,26,28,29,30,41,66
+    for band in 1 2 3 4 5 7 8 12 13 17 18 19 20 26 28 29 30 41 66; do
+        local xact_band=$((100 + band))
+        add_avalible_band_entry "$xact_band" "LTE_$band"
+    done
+    json_close_array
+    json_add_array "lock_band"
+    json_close_array
+    json_close_object
+
+    # Parse current locked bands from AT+XACT? response
+    # Format: +XACT: <rat>,,,<band1>,<band2>,...
+    # If bands = 0, all bands are enabled
+    local current_bands=$(echo "$get_lockband_config_res" | awk -F',,,' '{print $2}')
+    if [ -n "$current_bands" ] && [ "$current_bands" != "0" ]; then
+        for band in $(echo "$current_bands" | tr ',' ' '); do
+            [ -z "$band" ] && continue
+            if [ "$band" -lt 100 ]; then
+                # WCDMA band
+                json_select "UMTS"
+                json_select "lock_band"
+                json_add_string "" "$band"
+                json_select ".."
+                json_select ".."
+            else
+                # LTE band (100+band_number format)
+                json_select "LTE"
+                json_select "lock_band"
+                json_add_string "" "$band"
+                json_select ".."
+                json_select ".."
+            fi
+        done
+    else
+        # 0 means all bands enabled - mark all as locked
+        for band in 1 2 4 5 8; do
+            json_select "UMTS"
+            json_select "lock_band"
+            json_add_string "" "$band"
+            json_select ".."
+            json_select ".."
+        done
+        for band in 1 2 3 4 5 7 8 12 13 17 18 19 20 26 28 29 30 41 66; do
+            local xact_band=$((100 + band))
+            json_select "LTE"
+            json_select "lock_band"
+            json_add_string "" "$xact_band"
+            json_select ".."
+            json_select ".."
+        done
+    fi
+}
+
+#设置锁频 (Intel XMM平台, 使用AT+XACT)
+set_lockband_intel()
+{
+    m_debug "Fibocom set lockband intel (AT+XACT)"
+    # Get current RAT preference
+    local current_xact=$(at $at_port "AT+XACT?" | grep "+XACT:" | sed 's/+XACT: //g' | sed 's/\r//g')
+    local current_rat=$(echo "$current_xact" | awk -F',' '{print $1}')
+    [ -z "$current_rat" ] && current_rat="4"
+
+    # lock_band comes as comma-separated list from the UI
+    if [ -z "$lock_band" ] || [ "$lock_band" = "0" ]; then
+        # All bands
+        res=$(at $at_port "AT+XACT=${current_rat},,,0")
+    else
+        # Specific bands
+        res=$(at $at_port "AT+XACT=${current_rat},,,${lock_band}")
+    fi
 }
 
 #设置锁频

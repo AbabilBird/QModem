@@ -365,6 +365,12 @@ match_config()
     #nari-m601
     [[ "$name" = *"m601"* ]] && name="n510m"
 
+    #L850-GL / Intel XMM7360
+    [[ "$name" = *"l850-gl"* ]] || [[ "$name" = *"xmm7360"* ]] && name="l850-gl"
+
+    #L860-GL / Intel XMM7560
+    [[ "$name" = *"l860-gl"* ]] || [[ "$name" = *"xmm7560"* ]] && name="l860-gl"
+
     modem_config=$(echo $modem_support | jq '.modem_support."'$slot_type'"."'$name'"')
     [ "$modem_config" == "null"  ] && return
     [ -z "$modem_config"  ] && return
