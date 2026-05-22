@@ -81,6 +81,8 @@ jobs:
           # eSIM support (lpac + lpac-manager)
           CONFIG_PACKAGE_luci-app-lpac-manager=m
           CONFIG_PACKAGE_lpac=m
+          CONFIG_LPAC_WITH_MBIM=y
+          CONFIG_LPAC_WITH_AT=y
           # Connection managers
           CONFIG_PACKAGE_quectel-CM-5G-M=m
           CONFIG_PACKAGE_tom_modem=m
@@ -106,20 +108,32 @@ jobs:
           ./scripts/feeds update qmodem
           ./scripts/feeds install -a -p qmodem
 
-          # Compile generic packages (platform-independent)
+          # Compile generic packages (platform-independent, PKGARCH=all)
           for package in luci-app-qmodem luci-app-qmodem-sms luci-app-qmodem-next luci-app-lpac-manager qmodem qmodem-esim-bot; do
             echo "=== Compiling $package ==="
-            make package/$package/compile -j$(nproc) || echo "WARNING: $package failed"
+            make package/$package/compile -j$(nproc) V=s 2>&1 | tail -5 || echo "WARNING: $package failed"
           done
 
-          # Compile arch-specific packages
+          # Compile arch-specific packages (need C compilation)
           for package in tom_modem quectel_CM_5G ubus_at_daemon sms_forwarder lpac; do
             echo "=== Compiling $package ==="
-            make package/$package/compile -j$(nproc) || echo "WARNING: $package failed"
+            make package/$package/compile -j$(nproc) V=s 2>&1 | tail -5 || echo "WARNING: $package failed"
           done
 
+          echo ""
           echo "=== Build output ==="
           ls -la bin/packages/${{ env.SDK_ARCH }}/qmodem/ 2>/dev/null || echo "No qmodem packages found"
+          echo ""
+          echo "=== Checking critical packages ==="
+          for pkg in qmodem luci-app-qmodem-next luci-app-lpac-manager lpac quectel-CM-5G-M tom_modem; do
+            found=$(find bin/ -name "${pkg}*" 2>/dev/null | head -1)
+            if [ -n "$found" ]; then
+              echo "✅ $pkg: $(basename $found)"
+            else
+              echo "⚠️  $pkg: NOT FOUND in output"
+            fi
+          done
+
           echo "status=success" >> $GITHUB_OUTPUT
           echo "FIRMWARE=$(pwd)/bin/packages/${{ env.SDK_ARCH }}/qmodem/" >> $GITHUB_ENV
 
